@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import httpx
 from tenacity import (
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (429, 500, 502, 503, 504)
@@ -32,6 +32,10 @@ class HttpClient:
         timeout: Request timeout in seconds.
         max_connections: Connection pool size.
         base_url: Optional base URL for all requests.
+        headers: Default headers for every request (e.g. auth).
+        auth_hook: Optional callable ``(method, path) -> dict`` that returns
+            per-request headers (e.g. signed auth). Called fresh on every
+            attempt so retries get a new timestamp/signature.
     """
 
     def __init__(
@@ -42,15 +46,19 @@ class HttpClient:
         timeout: float = 30.0,
         max_connections: int = 20,
         base_url: str = "",
+        headers: Optional[dict] = None,
+        auth_hook: Optional[Callable[[str, str], dict]] = None,
     ):
         self._rate_limit = rate_limit
         self._max_retries = max_retries
+        self._auth_hook = auth_hook
         self._lock = threading.Lock()
         self._last_request: float = 0
 
         self._client = httpx.Client(
             base_url=base_url,
             timeout=timeout,
+            headers=headers or {},
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_connections,
@@ -83,6 +91,9 @@ class HttpClient:
     def post(self, url: str, *, json: Optional[Any] = None) -> Union[dict, list]:
         return self._request("POST", url, json=json)
 
+    def delete(self, url: str) -> Union[dict, list]:
+        return self._request("DELETE", url)
+
     def _request(self, method: str, url: str, **kwargs) -> Union[dict, list]:
         @retry(
             stop=stop_after_attempt(self._max_retries),
@@ -93,7 +104,8 @@ class HttpClient:
         )
         def _do():
             self._throttle()
-            response = self._client.request(method, url, **kwargs)
+            extra = self._auth_hook(method, url) if self._auth_hook else {}
+            response = self._client.request(method, url, headers=extra, **kwargs)
             response.raise_for_status()
             return response.json()
 

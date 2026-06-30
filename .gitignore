@@ -1,5 +1,6 @@
 .DS_Store
 .env
+*.pem
 
 # Python-generated files
 __pycache__/
@@ -28,3 +29,4 @@ fig
 *.tar.zst
 output
 .tmp
+
