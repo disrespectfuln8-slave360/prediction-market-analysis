@@ -41,7 +41,11 @@ class PolymarketMarketsIndexer(Indexer):
         all_markets = []
         total = offset
 
-        for markets, next_offset in client.iter_markets(offset=offset):
+        # The win-rate queries (src/trading/*/strategy.py, the mirrored
+        # analysis scripts) only ever use closed=true markets — fetch those
+        # directly instead of the newest/still-open markets the unfiltered
+        # default would return within the API's offset-pagination cap.
+        for markets, next_offset in client.iter_markets(offset=offset, closed="true"):
             if markets:
                 fetched_at = datetime.utcnow()
                 for market in markets:

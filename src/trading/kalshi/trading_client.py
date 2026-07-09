@@ -51,10 +51,14 @@ class Order:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Order":
+        # V2 API returns "bid" (buy YES) or "ask" (buy NO) — normalize to "yes"/"no"
+        # so _cancel_stale comparisons work against Opportunity.side.
+        raw_side = data.get("side", "")
+        side = "yes" if raw_side in ("bid", "yes") else "no"
         return cls(
             order_id=data.get("order_id", ""),
             ticker=data.get("ticker", ""),
-            side=data.get("side", ""),
+            side=side,
             action=data.get("action", "buy"),
             count=int(data.get("count", 0)),
             yes_price=int(data.get("yes_price", 0)),
@@ -69,9 +73,10 @@ class Position:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Position":
+        raw = data.get("position_fp", data.get("position", 0))
         return cls(
             ticker=data.get("ticker", ""),
-            position=int(data.get("position", 0)),
+            position=int(float(raw)),
         )
 
 
@@ -114,19 +119,48 @@ class KalshiTradingClient:
         data = self.http.get("/markets", params=params)
         return [Market.from_dict(m) for m in data.get("markets", [])]
 
-    def list_all_open_markets(self) -> list[Market]:
-        """Paginate through all open markets."""
+    def list_liquid_open_markets(
+        self,
+        min_volume_24h: int = 0,
+        series_list: Optional[list[str]] = None,
+    ) -> list[Market]:
+        """Fetch only liquid open markets by querying high-volume series directly.
+
+        Instead of paginating through all 50k+ markets (most illiquid esports),
+        this queries specific series known to be active and filters by volume.
+        Pass series_list to restrict to a specific subset (e.g. crypto-only).
+        """
+        series = series_list or [
+            "KXBTC", "KXETH", "KXSOL", "KXDOGE",          # crypto prices (hourly)
+            "KXBTC15M", "KXETH15M", "KXSOL15M",            # 15-min crypto brackets
+            "KXBTCD",                                        # daily BTC brackets
+            "KXINX", "KXNDX", "KXSPY", "KXDJI",            # stock indices
+            "INX", "NDX", "NASDAQ",                          # more indices
+            "FED", "FOMC", "CPI", "JOBS", "GDP", "UNRATE",  # macro
+            "PRES", "CONGRESS", "SENATE", "HOUSE",           # politics
+        ]
         all_markets: list[Market] = []
-        cursor = None
-        while True:
-            params: dict = {"limit": 200, "status": "open"}
-            if cursor:
-                params["cursor"] = cursor
-            data = self.http.get("/markets", params=params)
-            all_markets.extend(Market.from_dict(m) for m in data.get("markets", []))
-            cursor = data.get("cursor")
-            if not cursor:
-                break
+        seen: set[str] = set()
+
+        for prefix in series:
+            cursor = None
+            while True:
+                params: dict = {"limit": 200, "status": "open", "series_ticker": prefix}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    data = self.http.get("/markets", params=params)
+                except Exception:
+                    break
+                for m in data.get("markets", []):
+                    market = Market.from_dict(m)
+                    if market.ticker not in seen and market.volume_24h >= min_volume_24h:
+                        all_markets.append(market)
+                        seen.add(market.ticker)
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
+
         return all_markets
 
     # ── Portfolio ────────────────────────────────────────────────────────────
@@ -141,7 +175,7 @@ class KalshiTradingClient:
         return [
             Position.from_dict(p)
             for p in data.get("market_positions", [])
-            if p.get("position", 0) != 0
+            if float(p.get("position_fp", p.get("position", 0))) != 0
         ]
 
     def get_open_orders(self) -> list[Order]:
@@ -156,30 +190,39 @@ class KalshiTradingClient:
         side: str,
         count: int,
         yes_price: int,
-        action: str = "buy",
-        order_type: str = "limit",
     ) -> Order:
-        """Place a limit order.
+        """Place a GTC limit order using the Kalshi V2 order API.
 
         Args:
             ticker: Market ticker symbol.
-            side: "yes" or "no".
+            side: "yes" (buy YES) or "no" (buy NO).
             count: Number of contracts.
             yes_price: YES-side price in cents (1-99). For NO orders pass
-                       100 - no_price so Kalshi receives the YES-equivalent.
-            action: "buy" or "sell".
-            order_type: "limit" or "market".
+                       the YES-equivalent (100 - no_price).
         """
+        # V2 API: side is "bid" (buy YES) or "ask" (sell YES = buy NO).
+        # Price is a fixed-point dollar string like "0.14". count is a string.
+        v2_side = "bid" if side == "yes" else "ask"
         payload = {
             "ticker": ticker,
-            "action": action,
-            "type": order_type,
-            "side": side,
-            "count": count,
-            "yes_price": yes_price,
+            "side": v2_side,
+            "count": str(count),
+            "price": f"{yes_price / 100:.4f}",
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        data = self.http.post("/portfolio/orders", json=payload)
-        return Order.from_dict(data.get("order", data))
+        data = self.http.post("/portfolio/events/orders", json=payload)
+        # V2 response is flat (no "order" wrapper): {order_id, fill_count, remaining_count, ...}
+        remaining = float(data.get("remaining_count", count))
+        return Order(
+            order_id=data.get("order_id", ""),
+            ticker=ticker,
+            side=side,
+            action="buy",
+            count=count,
+            yes_price=yes_price,
+            status="resting" if remaining > 0 else "filled",
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         try:

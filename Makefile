@@ -1,4 +1,4 @@
-.PHONY: analyze run index package lint format test setup
+.PHONY: analyze run index package lint format test setup monitor-fixes
 
 RUN = uv run main.py
 
@@ -13,6 +13,9 @@ index:
 
 package:
 	$(RUN) package
+
+monitor-fixes:
+	uv run monitor_fixes.py
 
 lint:
 	uv run ruff check .

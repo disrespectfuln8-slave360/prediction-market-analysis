@@ -3,6 +3,7 @@
 import concurrent.futures
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -134,16 +135,29 @@ class PolymarketBlocksIndexer(Indexer):
                     concurrent.futures.as_completed(futures),
                     total=len(futures),
                     desc="Fetching samples",
+                    disable=not sys.stdout.isatty(),
                 ):
                     result = future.result()
                     if result:
                         sampled_timestamps.append(result)
 
-            if sampled_timestamps:
-                records = self._interpolate_timestamps(sampled_timestamps, current_bucket_start, bucket_end)
-                self._save_bucket(records, current_bucket_start, bucket_end)
+            if not sampled_timestamps:
+                # Nothing fetched for this bucket (e.g. RPC outage). Stop here instead
+                # of advancing past it, so the gap gets retried next run rather than
+                # silently skipped forever once a later bucket's file raises the max
+                # indexed block past it.
+                print(f"No samples fetched for blocks {current_bucket_start:,}-{bucket_end - 1:,}; stopping early")
+                break
 
-            current_bucket_start = bucket_end
+            records = self._interpolate_timestamps(sampled_timestamps, current_bucket_start, bucket_end)
+            # Use the actual last recorded block (not the nominal bucket_end) in case
+            # the tail-boundary sample failed to fetch: the filename/cursor must only
+            # claim coverage for blocks we actually recorded, or the shortfall would be
+            # silently and permanently skipped once later buckets advance past it.
+            actual_end = records[-1]["block_number"] + 1
+            self._save_bucket(records, current_bucket_start, actual_end)
+
+            current_bucket_start = actual_end
 
         print("\nIndexing complete")
 

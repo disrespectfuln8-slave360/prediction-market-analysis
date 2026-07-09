@@ -1,5 +1,6 @@
 """Indexer for Polymarket trades from the Polygon blockchain."""
 
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -111,7 +112,7 @@ class PolymarketTradesIndexer(Indexer):
 
         # Process by block range, fetching from both contracts for each range
         total_chunks = len(ranges)
-        pbar = tqdm(total=total_chunks, desc="Backfilling", unit=" chunks")
+        pbar = tqdm(total=total_chunks, desc="Backfilling", unit=" chunks", disable=not sys.stdout.isatty())
 
         interrupted = False
         try:
@@ -154,6 +155,13 @@ class PolymarketTradesIndexer(Indexer):
         except KeyboardInterrupt:
             interrupted = True
             print("\nInterrupted. Progress saved.")
+        except Exception as e:
+            # Don't let a single bad chunk (RPC error, oversized log response, etc.)
+            # propagate and drop the in-memory trade buffer: the cursor already
+            # advanced past earlier chunks, so losing this buffer would silently
+            # skip those blocks forever. Fall through to flush what we have.
+            interrupted = True
+            print(f"\nError during backfill, stopping early: {e}")
         finally:
             pbar.close()
 

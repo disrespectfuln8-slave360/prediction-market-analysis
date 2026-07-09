@@ -25,13 +25,13 @@ class Trade:
             """Converts string dollar values like '0.5600' to integer cents (56)."""
             if not val:
                 return 0
-            return int(float(val) * 100)
+            return round(float(val) * 100)
 
         def parse_float_string_to_int(val: Optional[str]) -> int:
             """Converts string float values like '10.00' to integers (10)."""
             if not val:
                 return 0
-            return int(float(val))
+            return round(float(val))
 
         return cls(
             trade_id=data["trade_id"],
@@ -78,13 +78,13 @@ class Market:
             """Converts string dollar values like '0.5600' to integer cents (56)."""
             if not val:
                 return None
-            return int(float(val) * 100)
+            return round(float(val) * 100)
 
         def parse_float_string_to_int(val: Optional[str]) -> int:
             """Converts string float values like '10.00' to integers (10)."""
             if not val:
                 return 0
-            return int(float(val))
+            return round(float(val))
 
         return cls(
             ticker=data["ticker"],

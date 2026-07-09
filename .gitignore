@@ -30,3 +30,6 @@ fig
 output
 .tmp
 
+# Runtime logs
+*.log
+

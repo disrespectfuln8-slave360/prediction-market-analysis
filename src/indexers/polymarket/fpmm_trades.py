@@ -1,6 +1,7 @@
 """Indexer for Polymarket FPMM trades from the Polygon blockchain."""
 
 import concurrent.futures
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,8 +48,10 @@ class FPMMTrade:
     @property
     def price(self) -> float:
         """Calculate price in collateral per token."""
+        # amount is 6-decimal collateral (USDC), outcome_tokens is 18-decimal;
+        # dividing raw ints without normalizing scales gives a price off by 1e12.
         if self.outcome_tokens > 0:
-            return self.amount / self.outcome_tokens
+            return self.volume / self.size
         return 0.0
 
     @property
@@ -146,7 +149,7 @@ class PolymarketLegacyTradesIndexer(Indexer):
                 )
             )
         except Exception as e:
-            if "too large" in str(e).lower():
+            if "too large" in str(e).lower() and from_block < to_block:
                 mid = (from_block + to_block) // 2
                 left = self._fetch_logs_with_retry(client, topic, from_block, mid)
                 right = self._fetch_logs_with_retry(client, topic, mid + 1, to_block)
@@ -248,9 +251,10 @@ class PolymarketLegacyTradesIndexer(Indexer):
 
         # Process by block range with parallel fetching
         total_chunks = len(ranges)
-        pbar = tqdm(total=total_chunks, desc="Backfilling Legacy", unit=" chunks")
+        pbar = tqdm(total=total_chunks, desc="Backfilling Legacy", unit=" chunks", disable=not sys.stdout.isatty())
         last_block_processed = from_block
 
+        interrupted = False
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 for batch_start in range(0, len(ranges), self._max_workers):
@@ -298,6 +302,7 @@ class PolymarketLegacyTradesIndexer(Indexer):
                     CURSOR_FILE.write_text(str(last_block_processed))
 
         except KeyboardInterrupt:
+            interrupted = True
             print("\nInterrupted. Progress saved.")
         finally:
             pbar.close()
@@ -306,7 +311,8 @@ class PolymarketLegacyTradesIndexer(Indexer):
         if all_trades:
             save_batch(all_trades)
 
-        if CURSOR_FILE.exists():
+        # Only clean up cursor on successful completion (else resume needs it)
+        if not interrupted and CURSOR_FILE.exists():
             CURSOR_FILE.unlink()
 
         print(f"\nFPMM backfill complete: {total_saved} trades saved")
