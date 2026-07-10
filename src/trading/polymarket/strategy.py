@@ -26,6 +26,22 @@ class TradeOpp:
     count: int         # shares to buy
 
 
+def event_key(market: Market) -> str:
+    """Group markets that share the same underlying real-world event.
+
+    Polymarket condition_ids are opaque hashes with no exploitable
+    substructure like Kalshi's ticker format, so this is a coarser
+    heuristic: bucket by (first tag, close hour). It catches the clearest
+    correlated case — several differently-worded questions about the same
+    topic expiring in the same hour (e.g. multiple BTC threshold questions
+    for the same close) — but won't catch different-topic markets tied to
+    one event that don't share a tag.
+    """
+    topic = market.tags[0] if market.tags else "unknown"
+    hour_bucket = market.end_time.strftime("%Y-%m-%dT%H") if market.end_time else "unknown"
+    return f"{topic}:{hour_bucket}"
+
+
 class MispricingStrategy:
     """Find open Polymarket markets where the ask price is below the
     historical win rate observed at that price on-chain.
@@ -182,10 +198,17 @@ class MispricingStrategy:
         """Label used for learning/tracker bucketing — first gamma tag, if any."""
         return market.tags[0] if market.tags else "unknown"
 
-    def _contracts_for_spend(self, price_cents: int) -> int:
+    def _contracts_for_spend(self, price_cents: int, series: Optional[str] = None) -> int:
         if price_cents <= 0:
             return 0
-        return self.max_spend_cents // price_cents
+        spend = self.max_spend_cents
+        if series is not None and self.tracker:
+            # Scale size by this category's realized track record — a proven
+            # loser gets sized down (never below 75%), a proven winner gets a
+            # modest, capped boost. Never overrides the min_edge_pp gate, only
+            # nudges how much to bet once a bet has already cleared it.
+            spend = int(spend * self.tracker.confidence_multiplier(series))
+        return spend // price_cents
 
     def _interpolate_win_rate(self, price: int) -> Optional[float]:
         """Return win rate at price, interpolating between nearest known points."""
@@ -235,6 +258,15 @@ class MispricingStrategy:
 
             series = self._market_series(market)
 
+            # Circuit breaker — skip this whole category if it's proven a
+            # loser across all sides/prices, not just underperforming in one
+            # price bucket (which get_edge_adjustment below already handles).
+            if self.tracker:
+                block_reason = self.tracker.is_category_blocked(series)
+                if block_reason:
+                    logger.debug("Skipping %s: %s", market.condition_id, block_reason)
+                    continue
+
             # First outcome ("Yes"-equivalent): pay yes_ask, win if it resolves.
             if self.min_entry_price <= market.yes_ask <= self.max_entry_price:
                 wr = self._interpolate_win_rate(market.yes_ask)
@@ -245,7 +277,7 @@ class MispricingStrategy:
                         if self.tracker else 0.0
                     )
                     if edge >= self.min_edge_pp + learned_adj:
-                        count = self._contracts_for_spend(market.yes_ask)
+                        count = self._contracts_for_spend(market.yes_ask, series)
                         if count > 0:
                             opps.append(TradeOpp(
                                 market=market,
@@ -270,7 +302,7 @@ class MispricingStrategy:
                         if self.tracker else 0.0
                     )
                     if edge >= self.min_edge_pp + learned_adj:
-                        count = self._contracts_for_spend(market.no_ask)
+                        count = self._contracts_for_spend(market.no_ask, series)
                         if count > 0:
                             opps.append(TradeOpp(
                                 market=market,

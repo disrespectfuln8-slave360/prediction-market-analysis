@@ -24,6 +24,24 @@ DATA_PATH = Path("data/polymarket/learning.json")
 MIN_BETS_FOR_ADJUSTMENT = 10
 MAX_EDGE_ADJUSTMENT_PP = 6.0
 
+# ── Category circuit-breaker (whole-series, coarser than the per-bucket
+# edge adjustment above) ──────────────────────────────────────────────────
+CATEGORY_ALL_LOSS_MIN = 4    # this many CONSECUTIVE (most recent) losses -> early block
+CATEGORY_MIN_SAMPLE = 15     # settled bets needed before trusting a category's return rate
+# A block has no other way to lift (no new bets get placed/recorded for a
+# blocked category, so its stats can never improve on their own) — after
+# this long with no new resolved bet, allow one fresh probe instead of
+# blocking forever. If the underlying condition is still bad, a new losing
+# streak re-blocks it almost immediately; if it's improved, real data can
+# finally accumulate again.
+CATEGORY_BLOCK_COOLDOWN_DAYS = 3
+
+# ── Confidence-weighted sizing ────────────────────────────────────────────
+CONFIDENCE_MIN_SAMPLE = 10   # settled bets needed before nudging size at all
+UNTESTED_MULT = 0.90         # haircut for a category with zero resolved history
+MIN_MULT = 0.75              # worst-case size haircut for a bad track record
+MAX_MULT = 1.20              # best-case size boost for a good track record
+
 
 @dataclass
 class BetRecord:
@@ -203,6 +221,87 @@ class PerformanceTracker:
 
         adjustment = min(MAX_EDGE_ADJUSTMENT_PP, underperformance * 0.5)
         return round(adjustment, 2)
+
+    # ── Category circuit-breaker ──────────────────────────────────────────────
+
+    def is_category_blocked(self, series: str) -> Optional[str]:
+        """Return a rejection reason if `series` has a proven bad track record
+        across ALL sides/prices, or None if clear to bet.
+
+        Coarser than get_edge_adjustment (whole series, not per side/price
+        bucket) — catches a category that's losing everywhere, not just in
+        one price band, which raising the required edge in individual
+        buckets wouldn't necessarily stop.
+        """
+        relevant = [b for b in self._bets if b.result is not None and b.series == series]
+        n = len(relevant)
+        if n == 0:
+            return None
+
+        # Chronological order so "most recent" checks below look at the tail,
+        # not an arbitrary dict/list order.
+        ordered = sorted(relevant, key=lambda b: b.settled_at or b.placed_at)
+
+        # No new bets get placed/recorded for an already-blocked category, so
+        # without this, a block could never lift itself even after whatever
+        # caused it is fixed. After a long enough gap since the last
+        # settlement, allow one fresh probe instead of blocking forever.
+        last_settled = ordered[-1].settled_at or ordered[-1].placed_at
+        if last_settled:
+            age_days = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(last_settled)
+            ).total_seconds() / 86400
+            if age_days >= CATEGORY_BLOCK_COOLDOWN_DAYS:
+                return None
+
+        # Most recent CATEGORY_ALL_LOSS_MIN results, all losses — a fast
+        # early block on a live losing streak, regardless of any older win
+        # elsewhere in the category's history.
+        recent = ordered[-CATEGORY_ALL_LOSS_MIN:]
+        if len(recent) >= CATEGORY_ALL_LOSS_MIN and all(b.result == "loss" for b in recent):
+            return (
+                f"{series}: last {len(recent)} resolved bets are all losses "
+                f"— blocked"
+            )
+
+        if n >= CATEGORY_MIN_SAMPLE:
+            total_pnl = sum(b.profit_cents or 0 for b in relevant)
+            total_staked = sum(b.entry_price * b.count for b in relevant)
+            return_rate = (total_pnl / total_staked) if total_staked > 0 else 0.0
+            if return_rate < 0:
+                return (
+                    f"{series}: {n} resolved bets, {return_rate:+.1%} return "
+                    f"— proven negative, blocked"
+                )
+        return None
+
+    # ── Confidence-weighted sizing ────────────────────────────────────────────
+
+    def confidence_multiplier(self, series: str) -> float:
+        """Position-size multiplier (MIN_MULT-MAX_MULT) from this category's
+        realized return rate. Asymmetric on purpose — punishes a bad track
+        record harder than it rewards a good one, consistent with
+        capital-preservation over chasing a hot streak.
+
+        Independent of is_category_blocked — a caller should check both;
+        this only ever nudges size, never gates whether to bet at all.
+        """
+        relevant = [b for b in self._bets if b.result is not None and b.series == series]
+        n = len(relevant)
+        if n == 0:
+            return UNTESTED_MULT
+        if n < CONFIDENCE_MIN_SAMPLE:
+            return 1.0
+
+        total_pnl = sum(b.profit_cents or 0 for b in relevant)
+        total_staked = sum(b.entry_price * b.count for b in relevant)
+        return_rate = (total_pnl / total_staked) if total_staked > 0 else 0.0
+
+        if return_rate >= 0:
+            mult = 1.0 + min(return_rate, 1.0) * (MAX_MULT - 1.0)
+        else:
+            mult = 1.0 + max(return_rate, -1.0) * (1.0 - MIN_MULT)
+        return max(MIN_MULT, min(MAX_MULT, mult))
 
     # ── Summaries ─────────────────────────────────────────────────────────────
 

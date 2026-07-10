@@ -30,6 +30,7 @@ from typing import Optional
 import httpx
 
 from src.trading.polymarket.models import Market
+from src.trading.polymarket.strategy import event_key
 from src.trading.polymarket.trading_client import PolymarketTradingClient
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,7 @@ class ConvergenceBot:
         max_close_secs:  int   = DEFAULT_MAX_CLOSE_SECS,
         max_spend_cents: int   = DEFAULT_MAX_SPEND,
         poll_interval:   int   = DEFAULT_POLL,
+        event_tracker=None,
     ):
         self.client          = client
         self.tag_slugs       = tag_slugs or DEFAULT_TAG_SLUGS
@@ -224,6 +226,7 @@ class ConvergenceBot:
         self.max_close_secs  = max_close_secs
         self.max_spend_cents = max_spend_cents
         self.poll_interval   = poll_interval
+        self.event_tracker   = event_tracker
         self._fetcher        = _PriceFetcher()
         self._dead:           set[str] = set()
 
@@ -353,6 +356,12 @@ class ConvergenceBot:
                              opp.market.condition_id, cost, remaining)
                 continue
 
+            ekey = event_key(opp.market)
+            if self.event_tracker and not self.event_tracker.try_reserve(ekey, cost):
+                logger.debug("[convergence] Skipping %s — event %s at daily exposure cap",
+                             opp.market.condition_id, ekey)
+                continue
+
             close_secs = (
                 opp.market.end_time - datetime.now(timezone.utc)
             ).total_seconds()
@@ -379,6 +388,8 @@ class ConvergenceBot:
                 held.add(opp.market.condition_id)
                 remaining -= cost
             except Exception as exc:
+                if self.event_tracker:
+                    self.event_tracker.release(ekey, cost)
                 msg = str(exc)
                 if "not found" in msg.lower() or "404" in msg:
                     self._dead.add(opp.market.condition_id)

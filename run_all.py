@@ -37,7 +37,15 @@ logging.basicConfig(
     format="%(asctime)s  [%(name)-20s]  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Every single outbound HTTP request logs at INFO by default — fine for a
+# short foreground run, but unbounded noise for a process meant to run for
+# days unattended. Bot decisions/fills/errors are logged separately at the
+# application level and aren't affected by this.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+from src.common.event_exposure import EventExposureTracker
+from src.common.reservation import TickerReservation
 from src.trading.kalshi.bot import TradingBot, run_indexer_loop
 from src.trading.kalshi.convergence_bot import ConvergenceBot
 from src.trading.kalshi.learning import PerformanceTracker
@@ -46,6 +54,12 @@ from src.trading.kalshi.trading_client import KalshiTradingClient
 from src.trading.mode import is_paper_mode, log_mode_banner
 from src.trading.polymarket.arb_scanner import run_arb_loop
 from src.trading.polymarket.trading_client import PolymarketTradingClient
+
+# Max total spend on any single correlated real-world event per day, across
+# every bot sharing the tracker — e.g. one BTC close hour's price brackets,
+# one game's markets. 3x a single max bet: enough room for a couple of
+# legitimate related bets without letting correlated risk stack unbounded.
+MAX_EVENT_EXPOSURE_CENTS = 1500
 
 
 def make_kalshi_client() -> KalshiTradingClient:
@@ -129,7 +143,14 @@ BOTS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _run_bot(cfg: dict, stop_event: threading.Event, tracker: PerformanceTracker, client: KalshiTradingClient):
+def _run_bot(
+    cfg: dict,
+    stop_event: threading.Event,
+    tracker: PerformanceTracker,
+    client: KalshiTradingClient,
+    reservation: TickerReservation,
+    event_tracker: EventExposureTracker,
+):
     log = logging.getLogger(cfg["name"])
     strategy = MispricingStrategy(
         ticker_prefixes=cfg["ticker_prefixes"],
@@ -151,6 +172,8 @@ def _run_bot(cfg: dict, stop_event: threading.Event, tracker: PerformanceTracker
         balance_fraction=cfg["balance_fraction"],
         series_list=cfg["series_list"],
         tracker=tracker,
+        reservation=reservation,
+        event_tracker=event_tracker,
     )
     log.info(
         "Started — series=%s  poll=%ds  balance_fraction=%.0f%%",
@@ -193,6 +216,12 @@ def main():
     kalshi_client = make_kalshi_client()
     poly_client = make_polymarket_client()
 
+    # Shared across crypto/macro/convergence: closes the race window between
+    # two threads both seeing an unheld ticker (reservation), and caps total
+    # daily spend on any one correlated real-world event (event_tracker).
+    reservation = TickerReservation()
+    event_tracker = EventExposureTracker(MAX_EVENT_EXPOSURE_CENTS)
+
     # One shared indexer — keeps local trade data fresh for both bots.
     # Only scan crypto+macro series to avoid iterating over 9M+ esports markets.
     all_series = CRYPTO_SERIES + MACRO_SERIES
@@ -208,7 +237,7 @@ def main():
     for cfg in BOTS:
         t = threading.Thread(
             target=_run_bot,
-            args=(cfg, stop_event, tracker, kalshi_client),
+            args=(cfg, stop_event, tracker, kalshi_client, reservation, event_tracker),
             name=cfg["name"],
             daemon=True,
         )
@@ -243,6 +272,8 @@ def main():
             max_close_secs=600,
             max_spend_cents=500,
             poll_interval=20,
+            reservation=reservation,
+            event_tracker=event_tracker,
         )
         bot.run(stop_event)
 

@@ -16,6 +16,8 @@ logging.basicConfig(
     format="%(asctime)s  [%(name)-20s]  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from src.trading.kalshi.trading_client import KalshiTradingClient
 from src.trading.mode import is_paper_mode, log_mode_banner

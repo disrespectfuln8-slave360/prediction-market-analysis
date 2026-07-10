@@ -6,9 +6,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.common.event_exposure import EventExposureTracker
 from src.common.reservation import TickerReservation
 from src.trading.kalshi.learning import PerformanceTracker
-from src.trading.kalshi.strategy import MispricingStrategy, Opportunity, Lock
+from src.trading.kalshi.strategy import MispricingStrategy, Opportunity, Lock, event_key
 from src.trading.kalshi.trading_client import KalshiTradingClient, Order
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class TradingBot:
         win_rate_reload_interval: int = 200,
         tracker: Optional[PerformanceTracker] = None,
         reservation: Optional[TickerReservation] = None,
+        event_tracker: Optional[EventExposureTracker] = None,
     ):
         self.client = client
         self.strategy = strategy
@@ -86,6 +88,7 @@ class TradingBot:
         self.win_rate_reload_interval = win_rate_reload_interval
         self.tracker = tracker
         self.reservation = reservation
+        self.event_tracker = event_tracker
         self._last_reload = 0.0
         self._dead_tickers: set[str] = set()
         self._last_daily_summary = 0.0
@@ -144,10 +147,20 @@ class TradingBot:
 
             limit_cents, yes_price = self._limit_price(opp)
             cost = limit_cents * opp.count
+            ekey = event_key(opp.market.ticker)
             if cost > remaining:
                 logger.debug(
                     "Skipping %s: cost %d¢ > remaining budget %d¢",
                     opp.market.ticker, cost, remaining,
+                )
+                if self.reservation:
+                    self.reservation.release(opp.market.ticker)
+                continue
+
+            if self.event_tracker and not self.event_tracker.try_reserve(ekey, cost):
+                logger.debug(
+                    "Skipping %s: event %s already at its daily exposure cap",
+                    opp.market.ticker, ekey,
                 )
                 if self.reservation:
                     self.reservation.release(opp.market.ticker)
@@ -160,16 +173,40 @@ class TradingBot:
                     count=opp.count,
                     yes_price=yes_price,
                 )
-                logger.info(
-                    "Placed %s on %s: %dx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
-                    opp.side.upper(),
-                    opp.market.ticker,
-                    opp.count,
-                    limit_cents,
-                    opp.entry_price,
-                    opp.edge,
-                    order.order_id,
-                )
+            except Exception as exc:
+                # Order genuinely never went through — safe to give back both
+                # the ticker claim and the event budget.
+                if self.reservation:
+                    self.reservation.release(opp.market.ticker)
+                if self.event_tracker:
+                    self.event_tracker.release(ekey, cost)
+                body = getattr(getattr(exc, "response", None), "text", "")
+                if "410" in str(exc):
+                    self._dead_tickers.add(opp.market.ticker)
+                    logger.debug("Market gone (410), blacklisting: %s", opp.market.ticker)
+                elif "insufficient_balance" in body:
+                    logger.debug("Insufficient balance for %s, stopping placement", opp.market.ticker)
+                    break
+                else:
+                    logger.warning("Order failed on %s: %s  body=%s", opp.market.ticker, exc, body[:200])
+                continue
+
+            # Order placed successfully — from here on, a failure (e.g. a
+            # transient file-write error in record_bet) must NOT release the
+            # reservation/event budget, since the trade already happened and
+            # doing so would silently reopen the ticker for a duplicate order
+            # and under-count real exposure against the daily event cap.
+            logger.info(
+                "Placed %s on %s: %dx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
+                opp.side.upper(),
+                opp.market.ticker,
+                opp.count,
+                limit_cents,
+                opp.entry_price,
+                opp.edge,
+                order.order_id,
+            )
+            try:
                 if self.tracker:
                     self.tracker.record_bet(
                         ticker=opp.market.ticker,
@@ -180,21 +217,15 @@ class TradingBot:
                         count=opp.count,
                         close_time=opp.market.close_time,
                     )
-                held.add(opp.market.ticker)
-                remaining -= cost
-                placed += 1
             except Exception as exc:
-                if self.reservation:
-                    self.reservation.release(opp.market.ticker)
-                body = getattr(getattr(exc, "response", None), "text", "")
-                if "410" in str(exc):
-                    self._dead_tickers.add(opp.market.ticker)
-                    logger.debug("Market gone (410), blacklisting: %s", opp.market.ticker)
-                elif "insufficient_balance" in body:
-                    logger.debug("Insufficient balance for %s, stopping placement", opp.market.ticker)
-                    break
-                else:
-                    logger.warning("Order failed on %s: %s  body=%s", opp.market.ticker, exc, body[:200])
+                logger.error(
+                    "CRITICAL: order %s placed on %s but record_bet failed — "
+                    "learning data may be incomplete: %s",
+                    order.order_id, opp.market.ticker, exc,
+                )
+            held.add(opp.market.ticker)
+            remaining -= cost
+            placed += 1
         return remaining
 
     def _place_locks(self, locks: list[Lock], held: set[str], budget_cents: int):

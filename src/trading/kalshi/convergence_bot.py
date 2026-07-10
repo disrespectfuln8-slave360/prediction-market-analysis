@@ -44,7 +44,9 @@ from typing import Optional
 
 import httpx
 
+from src.common.reservation import TickerReservation
 from src.indexers.kalshi.models import Market
+from src.trading.kalshi.strategy import event_key
 from src.trading.kalshi.trading_client import KalshiTradingClient
 
 logger = logging.getLogger(__name__)
@@ -256,6 +258,8 @@ class ConvergenceBot:
         max_close_secs:  int   = DEFAULT_MAX_CLOSE_SECS,
         max_spend_cents: int   = DEFAULT_MAX_SPEND,
         poll_interval:   int   = DEFAULT_POLL,
+        event_tracker=None,
+        reservation: Optional[TickerReservation] = None,
     ):
         self.client          = client
         self.min_prob        = min_prob
@@ -265,6 +269,8 @@ class ConvergenceBot:
         self.max_close_secs  = max_close_secs
         self.max_spend_cents = max_spend_cents
         self.poll_interval   = poll_interval
+        self.event_tracker   = event_tracker
+        self.reservation     = reservation
         self._fetcher        = _PriceFetcher()
         self._dead:           set[str] = set()
 
@@ -408,10 +414,23 @@ class ConvergenceBot:
         remaining = balance
 
         for opp in opps:
+            if self.reservation and not self.reservation.try_reserve(opp.market.ticker):
+                continue
+
             cost = opp.entry_price * opp.count
             if cost > remaining:
                 logger.debug("[convergence] Skipping %s — cost %d¢ > remaining %d¢",
                              opp.market.ticker, cost, remaining)
+                if self.reservation:
+                    self.reservation.release(opp.market.ticker)
+                continue
+
+            ekey = event_key(opp.market.ticker)
+            if self.event_tracker and not self.event_tracker.try_reserve(ekey, cost):
+                logger.debug("[convergence] Skipping %s — event %s at daily exposure cap",
+                             opp.market.ticker, ekey)
+                if self.reservation:
+                    self.reservation.release(opp.market.ticker)
                 continue
 
             close_secs = (
@@ -440,6 +459,10 @@ class ConvergenceBot:
                 held.add(opp.market.ticker)
                 remaining -= cost
             except Exception as exc:
+                if self.event_tracker:
+                    self.event_tracker.release(ekey, cost)
+                if self.reservation:
+                    self.reservation.release(opp.market.ticker)
                 body = getattr(getattr(exc, "response", None), "text", "")
                 if "410" in str(exc):
                     self._dead.add(opp.market.ticker)

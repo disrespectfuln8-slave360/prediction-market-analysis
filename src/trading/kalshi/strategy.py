@@ -35,6 +35,43 @@ class Lock:
     profit_cents: int # guaranteed profit per contract pair (100 - yes_ask - no_ask)
 
 
+def event_key(ticker: str) -> str:
+    """Group ticker variants (price brackets, strikes, game sides) that share
+    the same underlying real-world event.
+
+    Kalshi tickers are "SERIES-DATETIME[PLAYERS]-SUFFIX" — dropping the last
+    hyphen-separated segment groups the different brackets/strikes of one
+    market instance together (e.g. every BTC price bracket for the same
+    close hour: "KXBTC-26JUL0918-B63250" and "KXBTC-26JUL0918-B63350" both
+    key to "KXBTC-26JUL0918"). Only applies when the ticker has 3+ segments
+    (2+ hyphens) — a 2-segment ticker like "KXMLBRFI-26MAY311335MINPIT" has
+    no separate strike/bracket suffix to drop; dropping its only hyphen
+    would collapse every distinct game in that series into one key, which
+    is wrong (verified against real data: this exact series does this if
+    the last-segment drop is applied unconditionally). For a 2-segment
+    ticker the whole ticker is its own event_key instead.
+
+    Known limitations, not correctness bugs — this is a heuristic, not an
+    exhaustive per-series parser:
+      - Doesn't group across different SERIES for the same real-world event
+        (e.g. KXMLBGAME and KXMLBSPREAD tickers for the same game get
+        different keys).
+      - For tickers with 4+ segments where more than one trailing segment
+        varies per distinct market (e.g. multi-candidate primary tickers
+        like "KXCAGOVPRIMARYTOP3-26JUN02-BEC-BIA-HIL" vs
+        "...-BEC-BIA-STE" — different permutations of the same election),
+        dropping only the last segment does NOT merge them even though
+        they're the same event. Do not add any such multi-candidate/
+        permutation series to a bot's series_list without revisiting this
+        function first.
+    """
+    n_hyphens = ticker.count("-")
+    if n_hyphens < 2:
+        return ticker
+    parts = ticker.rsplit("-", 1)
+    return parts[0]
+
+
 class MispricingStrategy:
     """Find open markets where current ask price is below the historical win rate.
 
@@ -151,10 +188,17 @@ class MispricingStrategy:
                     return p
         return ticker.split("-")[0]
 
-    def _contracts_for_spend(self, price_cents: int) -> int:
+    def _contracts_for_spend(self, price_cents: int, series: Optional[str] = None) -> int:
         if price_cents <= 0:
             return 0
-        return self.max_spend_cents // price_cents
+        spend = self.max_spend_cents
+        if series is not None and self.tracker:
+            # Scale size by this category's realized track record — a proven
+            # loser gets sized down (never below 75%), a proven winner gets a
+            # modest, capped boost. Never overrides the min_edge_pp gate, only
+            # nudges how much to bet once a bet has already cleared it.
+            spend = int(spend * self.tracker.confidence_multiplier(series))
+        return spend // price_cents
 
     def _interpolate_win_rate(self, price: int) -> Optional[float]:
         """Return win rate at price, interpolating between nearest known points."""
@@ -210,6 +254,15 @@ class MispricingStrategy:
 
             series = self._ticker_series(market.ticker)
 
+            # Circuit breaker — skip this whole category if it's proven a
+            # loser across all sides/prices, not just underperforming in one
+            # price bucket (which get_edge_adjustment below already handles).
+            if self.tracker:
+                block_reason = self.tracker.is_category_blocked(series)
+                if block_reason:
+                    logger.debug("Skipping %s: %s", market.ticker, block_reason)
+                    continue
+
             # YES side: pay yes_ask, win if YES resolves
             if self.min_entry_price <= market.yes_ask <= self.max_entry_price:
                 wr_yes = self._interpolate_win_rate(market.yes_ask)
@@ -222,7 +275,7 @@ class MispricingStrategy:
                         if self.tracker else 0.0
                     )
                     if edge >= self.min_edge_pp + learned_adj:
-                        count = self._contracts_for_spend(market.yes_ask)
+                        count = self._contracts_for_spend(market.yes_ask, series)
                         if count > 0:
                             opps.append(Opportunity(
                                 market=market,
@@ -245,7 +298,7 @@ class MispricingStrategy:
                         if self.tracker else 0.0
                     )
                     if edge >= self.min_edge_pp + learned_adj:
-                        count = self._contracts_for_spend(market.no_ask)
+                        count = self._contracts_for_spend(market.no_ask, series)
                         if count > 0:
                             opps.append(Opportunity(
                                 market=market,

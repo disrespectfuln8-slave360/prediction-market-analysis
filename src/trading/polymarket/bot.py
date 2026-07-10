@@ -6,8 +6,9 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from src.common.event_exposure import EventExposureTracker
 from src.trading.polymarket.learning import PerformanceTracker
-from src.trading.polymarket.strategy import MispricingStrategy, TradeOpp
+from src.trading.polymarket.strategy import MispricingStrategy, TradeOpp, event_key
 from src.trading.polymarket.trading_client import Order, PolymarketTradingClient
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class TradingBot:
         tag_slugs: Optional[list[str]] = None,
         win_rate_reload_interval: int = 200,
         tracker: Optional[PerformanceTracker] = None,
+        event_tracker: Optional[EventExposureTracker] = None,
     ):
         self.client = client
         self.strategy = strategy
@@ -74,6 +76,7 @@ class TradingBot:
         self.tag_slugs = tag_slugs
         self.win_rate_reload_interval = win_rate_reload_interval
         self.tracker = tracker
+        self.event_tracker = event_tracker
         self._last_reload = 0.0
         self._dead_ids: set[str] = set()
         self._last_daily_summary = 0.0
@@ -129,6 +132,14 @@ class TradingBot:
                 )
                 continue
 
+            ekey = event_key(opp.market)
+            if self.event_tracker and not self.event_tracker.try_reserve(ekey, cost):
+                logger.debug(
+                    "Skipping %s: event %s already at its daily exposure cap",
+                    opp.market.condition_id, ekey,
+                )
+                continue
+
             try:
                 order = self.client.place_order(
                     condition_id=opp.market.condition_id,
@@ -137,11 +148,32 @@ class TradingBot:
                     price=limit_cents,
                     side="BUY",
                 )
-                logger.info(
-                    "Placed BUY %s on %s (%s): %sx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
-                    opp.outcome, opp.market.condition_id, opp.market.question[:60],
-                    opp.count, limit_cents, opp.entry_price, opp.edge, order.order_id,
-                )
+            except Exception as exc:
+                # Order genuinely never went through — safe to give back the
+                # event budget.
+                if self.event_tracker:
+                    self.event_tracker.release(ekey, cost)
+                msg = str(exc)
+                if "not found" in msg.lower() or "404" in msg:
+                    self._dead_ids.add(opp.market.condition_id)
+                    logger.debug("Market gone, blacklisting: %s", opp.market.condition_id)
+                elif "insufficient" in msg.lower() or "balance" in msg.lower():
+                    logger.debug("Insufficient balance for %s, stopping placement", opp.market.condition_id)
+                    break
+                else:
+                    logger.warning("Order failed on %s: %s", opp.market.condition_id, exc)
+                continue
+
+            # Order placed successfully — from here on, a failure (e.g. a
+            # transient file-write error in record_bet) must NOT release the
+            # event budget, since the trade already happened and doing so
+            # would silently under-count real exposure against the cap.
+            logger.info(
+                "Placed BUY %s on %s (%s): %sx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
+                opp.outcome, opp.market.condition_id, opp.market.question[:60],
+                opp.count, limit_cents, opp.entry_price, opp.edge, order.order_id,
+            )
+            try:
                 if self.tracker:
                     self.tracker.record_bet(
                         condition_id=opp.market.condition_id,
@@ -152,19 +184,15 @@ class TradingBot:
                         count=opp.count,
                         close_time=opp.market.end_time,
                     )
-                held.add(opp.market.condition_id)
-                remaining -= cost
-                placed += 1
             except Exception as exc:
-                msg = str(exc)
-                if "not found" in msg.lower() or "404" in msg:
-                    self._dead_ids.add(opp.market.condition_id)
-                    logger.debug("Market gone, blacklisting: %s", opp.market.condition_id)
-                elif "insufficient" in msg.lower() or "balance" in msg.lower():
-                    logger.debug("Insufficient balance for %s, stopping placement", opp.market.condition_id)
-                    break
-                else:
-                    logger.warning("Order failed on %s: %s", opp.market.condition_id, exc)
+                logger.error(
+                    "CRITICAL: order %s placed on %s but record_bet failed — "
+                    "learning data may be incomplete: %s",
+                    order.order_id, opp.market.condition_id, exc,
+                )
+            held.add(opp.market.condition_id)
+            remaining -= cost
+            placed += 1
         return remaining
 
     # ── Main loop ─────────────────────────────────────────────────────────────
