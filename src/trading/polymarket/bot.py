@@ -3,15 +3,43 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 from src.common.event_exposure import EventExposureTracker
 from src.trading.polymarket.learning import PerformanceTracker
 from src.trading.polymarket.strategy import MispricingStrategy, TradeOpp, event_key
-from src.trading.polymarket.trading_client import Order, PolymarketTradingClient
+from src.trading.polymarket.trading_client import Order, PolymarketTradingClient, Position
 
 logger = logging.getLogger(__name__)
+
+# Statuses that unambiguously mean "matched right now, real money moved."
+# Everything else (including unrecognized values) defers to
+# _reconcile_pending_fills rather than risk treating a not-yet-filled order
+# as a confirmed bet — the status string comes verbatim from py-clob-client,
+# not a mapping this codebase controls, so this deliberately errs toward
+# more deferral rather than trusting an uncertain value.
+_IMMEDIATE_FILL_STATUSES = {"filled", "matched"}
+
+
+@dataclass
+class _PendingFill:
+    """A resting (not-yet-confirmed-filled) order — a real bet is only
+    recorded once we've confirmed real money actually moved, not just that
+    an order was accepted. Maker orders posted at the mid routinely rest
+    instead of filling immediately, and can later be cancelled unfilled —
+    counting those as bets would record P&L for money that was never
+    actually at risk (mirrors the same fix in src/trading/kalshi/bot.py,
+    made after a real/paper P&L mismatch during the first live session)."""
+    condition_id: str
+    outcome: str  # actual outcome string, to match against real Position.outcome
+    series: str
+    side: str     # "yes"/"no" — for the learning tracker's record_bet call
+    entry_price: int
+    predicted_win_rate: float
+    count: float
+    close_time: Optional[datetime]
 
 
 def run_indexer_loop(stop_event: threading.Event, interval: int = 1800):
@@ -80,6 +108,9 @@ class TradingBot:
         self._last_reload = 0.0
         self._dead_ids: set[str] = set()
         self._last_daily_summary = 0.0
+        # order_id -> _PendingFill, for orders placed but not yet confirmed
+        # filled (see _PendingFill docstring).
+        self._pending_fills: dict[str, _PendingFill] = {}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -96,6 +127,51 @@ class TradingBot:
                     logger.error(
                         "Failed to cancel stale order %s on %s — may still be resting",
                         order.order_id, order.condition_id,
+                    )
+
+    def _reconcile_pending_fills(self, positions: list[Position], open_orders: list[Order]) -> None:
+        """Resolve orders placed on a prior cycle that weren't confirmed
+        filled at that time. Only call record_bet once we know real money
+        actually moved — checked against the current live position, not
+        just the fact that an order was once accepted.
+        """
+        if not self._pending_fills:
+            return
+        still_open_ids = {o.order_id for o in open_orders}
+        size_by_key = {(p.condition_id, p.outcome): p.size for p in positions}
+
+        for order_id, pending in list(self._pending_fills.items()):
+            if order_id in still_open_ids:
+                continue  # still resting — check again next cycle
+            del self._pending_fills[order_id]
+            size = size_by_key.get((pending.condition_id, pending.outcome), 0.0)
+            if size <= 0:
+                logger.info(
+                    "Order %s on %s (%s) never filled (cancelled/expired unfilled) — no bet recorded",
+                    order_id, pending.condition_id, pending.outcome,
+                )
+                continue
+            actual_count = min(pending.count, size)
+            logger.info(
+                "Confirmed fill for %s on %s (%s): %sx (of %s requested)",
+                order_id, pending.condition_id, pending.outcome, actual_count, pending.count,
+            )
+            if self.tracker:
+                try:
+                    self.tracker.record_bet(
+                        condition_id=pending.condition_id,
+                        series=pending.series,
+                        side=pending.side,
+                        entry_price=pending.entry_price,
+                        predicted_win_rate=pending.predicted_win_rate,
+                        count=actual_count,
+                        close_time=pending.close_time,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "CRITICAL: confirmed fill for %s on %s but record_bet failed — "
+                        "learning data may be incomplete: %s",
+                        order_id, pending.condition_id, exc,
                     )
 
     def _limit_price(self, opp: TradeOpp) -> int:
@@ -169,26 +245,42 @@ class TradingBot:
             # event budget, since the trade already happened and doing so
             # would silently under-count real exposure against the cap.
             logger.info(
-                "Placed BUY %s on %s (%s): %sx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
+                "Placed BUY %s on %s (%s): %sx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s  status=%s",
                 opp.outcome, opp.market.condition_id, opp.market.question[:60],
-                opp.count, limit_cents, opp.entry_price, opp.edge, order.order_id,
+                opp.count, limit_cents, opp.entry_price, opp.edge, order.order_id, order.status,
             )
-            try:
-                if self.tracker:
-                    self.tracker.record_bet(
-                        condition_id=opp.market.condition_id,
-                        series=self.strategy._market_series(opp.market),
-                        side=self._outcome_side(opp),
-                        entry_price=limit_cents,
-                        predicted_win_rate=opp.win_rate,
-                        count=opp.count,
-                        close_time=opp.market.end_time,
+            if order.status and order.status.lower() in _IMMEDIATE_FILL_STATUSES:
+                try:
+                    if self.tracker:
+                        self.tracker.record_bet(
+                            condition_id=opp.market.condition_id,
+                            series=self.strategy._market_series(opp.market),
+                            side=self._outcome_side(opp),
+                            entry_price=limit_cents,
+                            predicted_win_rate=opp.win_rate,
+                            count=opp.count,
+                            close_time=opp.market.end_time,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "CRITICAL: order %s placed on %s but record_bet failed — "
+                        "learning data may be incomplete: %s",
+                        order.order_id, opp.market.condition_id, exc,
                     )
-            except Exception as exc:
-                logger.error(
-                    "CRITICAL: order %s placed on %s but record_bet failed — "
-                    "learning data may be incomplete: %s",
-                    order.order_id, opp.market.condition_id, exc,
+            else:
+                # Not confirmed filled yet — this is the normal case for
+                # these maker orders (posted at the mid, not crossing the
+                # spread). Don't record a bet yet; _reconcile_pending_fills
+                # confirms on a later cycle whether it actually filled.
+                self._pending_fills[order.order_id] = _PendingFill(
+                    condition_id=opp.market.condition_id,
+                    outcome=opp.outcome,
+                    series=self.strategy._market_series(opp.market),
+                    side=self._outcome_side(opp),
+                    entry_price=limit_cents,
+                    predicted_win_rate=opp.win_rate,
+                    count=opp.count,
+                    close_time=opp.market.end_time,
                 )
             held.add(opp.market.condition_id)
             remaining -= cost
@@ -222,6 +314,11 @@ class TradingBot:
         positions = self.client.get_positions()
         open_orders = self.client.get_open_orders()
         held = {p.condition_id for p in positions} | {o.condition_id for o in open_orders}
+
+        # Resolve any orders from a prior cycle that weren't confirmed
+        # filled at that time — must run before this cycle places any new
+        # orders so pending state never grows unbounded.
+        self._reconcile_pending_fills(positions, open_orders)
 
         slots = max(0, self.max_open_positions - len(positions) - len(open_orders))
 

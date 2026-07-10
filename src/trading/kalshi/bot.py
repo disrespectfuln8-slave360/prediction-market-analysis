@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -10,9 +11,29 @@ from src.common.event_exposure import EventExposureTracker
 from src.common.reservation import TickerReservation
 from src.trading.kalshi.learning import PerformanceTracker
 from src.trading.kalshi.strategy import MispricingStrategy, Opportunity, Lock, event_key
-from src.trading.kalshi.trading_client import KalshiTradingClient, Order
+from src.trading.kalshi.trading_client import KalshiTradingClient, Order, Position
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PendingFill:
+    """A resting (not-yet-confirmed-filled) order — a real bet is only
+    recorded once we've confirmed real money actually moved, not just that
+    an order was accepted. Maker orders posted at the mid routinely rest
+    instead of filling immediately, and can later be cancelled unfilled —
+    counting those as bets would record P&L for money that was never
+    actually at risk (confirmed root cause of a real/paper P&L mismatch
+    during the first live session: cancel_order was silently failing,
+    leaving orders resting and eventually filling at stale prices, while
+    record_bet had already logged them as settled bets regardless)."""
+    ticker: str
+    series: str
+    side: str
+    entry_price: int
+    predicted_win_rate: float
+    count: int
+    close_time: Optional[datetime]
 
 
 def run_indexer_loop(
@@ -92,6 +113,9 @@ class TradingBot:
         self._last_reload = 0.0
         self._dead_tickers: set[str] = set()
         self._last_daily_summary = 0.0
+        # order_id -> _PendingFill, for orders placed but not yet confirmed
+        # filled (see _PendingFill docstring).
+        self._pending_fills: dict[str, _PendingFill] = {}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -109,6 +133,52 @@ class TradingBot:
             if (order.ticker, order.side) not in live:
                 logger.info("Cancelling stale order %s on %s", order.order_id, order.ticker)
                 self.client.cancel_order(order.order_id)
+
+    def _reconcile_pending_fills(self, positions: list[Position], open_orders: list[Order]) -> None:
+        """Resolve orders placed on a prior cycle that were resting (not yet
+        confirmed filled) at that time. Only call record_bet once we know
+        real money actually moved — checked against the current live
+        position, not just the fact that an order was once accepted.
+        """
+        if not self._pending_fills:
+            return
+        still_open_ids = {o.order_id for o in open_orders}
+        net_by_ticker = {p.ticker: p.position for p in positions}
+
+        for order_id, pending in list(self._pending_fills.items()):
+            if order_id in still_open_ids:
+                continue  # still resting — check again next cycle
+            del self._pending_fills[order_id]
+            net = net_by_ticker.get(pending.ticker, 0)
+            filled = (pending.side == "yes" and net > 0) or (pending.side == "no" and net < 0)
+            if not filled:
+                logger.info(
+                    "Order %s on %s never filled (cancelled/expired unfilled) — no bet recorded",
+                    order_id, pending.ticker,
+                )
+                continue
+            actual_count = min(pending.count, abs(net))
+            logger.info(
+                "Confirmed fill for %s on %s: %dx (of %d requested)",
+                order_id, pending.ticker, actual_count, pending.count,
+            )
+            if self.tracker:
+                try:
+                    self.tracker.record_bet(
+                        ticker=pending.ticker,
+                        series=pending.series,
+                        side=pending.side,
+                        entry_price=pending.entry_price,
+                        predicted_win_rate=pending.predicted_win_rate,
+                        count=actual_count,
+                        close_time=pending.close_time,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "CRITICAL: confirmed fill for %s on %s but record_bet failed — "
+                        "learning data may be incomplete: %s",
+                        order_id, pending.ticker, exc,
+                    )
 
     def _limit_price(self, opp: Opportunity) -> tuple[int, int]:
         """Return (limit_price_in_side_cents, yes_price_for_api) for a maker order.
@@ -197,7 +267,7 @@ class TradingBot:
             # doing so would silently reopen the ticker for a duplicate order
             # and under-count real exposure against the daily event cap.
             logger.info(
-                "Placed %s on %s: %dx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s",
+                "Placed %s on %s: %dx @ %d¢ (mid, ask was %d¢)  edge=%.1fpp  id=%s  status=%s",
                 opp.side.upper(),
                 opp.market.ticker,
                 opp.count,
@@ -205,23 +275,41 @@ class TradingBot:
                 opp.entry_price,
                 opp.edge,
                 order.order_id,
+                order.status,
             )
-            try:
-                if self.tracker:
-                    self.tracker.record_bet(
-                        ticker=opp.market.ticker,
-                        series=self.strategy._ticker_series(opp.market.ticker),
-                        side=opp.side,
-                        entry_price=limit_cents,
-                        predicted_win_rate=opp.win_rate,
-                        count=opp.count,
-                        close_time=opp.market.close_time,
+            if order.status == "filled":
+                # Matched immediately — real money moved right now, safe to
+                # record as a confirmed bet.
+                try:
+                    if self.tracker:
+                        self.tracker.record_bet(
+                            ticker=opp.market.ticker,
+                            series=self.strategy._ticker_series(opp.market.ticker),
+                            side=opp.side,
+                            entry_price=limit_cents,
+                            predicted_win_rate=opp.win_rate,
+                            count=opp.count,
+                            close_time=opp.market.close_time,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "CRITICAL: order %s placed on %s but record_bet failed — "
+                        "learning data may be incomplete: %s",
+                        order.order_id, opp.market.ticker, exc,
                     )
-            except Exception as exc:
-                logger.error(
-                    "CRITICAL: order %s placed on %s but record_bet failed — "
-                    "learning data may be incomplete: %s",
-                    order.order_id, opp.market.ticker, exc,
+            else:
+                # Resting — this is the normal case for these maker orders
+                # (posted at the mid, not crossing the spread). Don't record
+                # a bet yet; _reconcile_pending_fills confirms on a later
+                # cycle whether it actually filled before it counts.
+                self._pending_fills[order.order_id] = _PendingFill(
+                    ticker=opp.market.ticker,
+                    series=self.strategy._ticker_series(opp.market.ticker),
+                    side=opp.side,
+                    entry_price=limit_cents,
+                    predicted_win_rate=opp.win_rate,
+                    count=opp.count,
+                    close_time=opp.market.close_time,
                 )
             held.add(opp.market.ticker)
             remaining -= cost
@@ -305,6 +393,11 @@ class TradingBot:
         positions    = self.client.get_positions()
         open_orders  = self.client.get_open_orders()
         held = {p.ticker for p in positions} | {o.ticker for o in open_orders}
+
+        # Resolve any orders from a prior cycle that were resting (not yet
+        # confirmed filled) at that time — must run before this cycle places
+        # any new orders so pending state never grows unbounded.
+        self._reconcile_pending_fills(positions, open_orders)
 
         # Count only positions AND resting orders in this bot's market universe
         # so two bots don't block each other's slot budget, and so resting limit
