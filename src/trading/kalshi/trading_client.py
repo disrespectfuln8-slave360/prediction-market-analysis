@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from src.common.client import HttpClient
 from src.indexers.kalshi.client import KALSHI_API_HOST
 from src.indexers.kalshi.models import Market
+
+logger = logging.getLogger(__name__)
 
 
 class _KalshiSigner:
@@ -225,8 +228,18 @@ class KalshiTradingClient:
         )
 
     def cancel_order(self, order_id: str) -> bool:
+        # V2 endpoint — the old "/portfolio/orders/{id}" path returns a
+        # 410 "deprecated_v1_order_endpoint" error (confirmed against the
+        # live API: it was silently swallowed here for the entirety of the
+        # first live-trading session, so every "stale order" cancellation
+        # was actually a no-op — the order stayed resting on the real book
+        # instead of being pulled, exactly the exposure this method exists
+        # to prevent). Matches the same /portfolio/events/orders/ family
+        # already used correctly by place_order.
         try:
-            self.http.delete(f"/portfolio/orders/{order_id}")
+            self.http.delete(f"/portfolio/events/orders/{order_id}")
             return True
-        except Exception:
+        except Exception as exc:
+            body = getattr(getattr(exc, "response", None), "text", "")
+            logger.warning("cancel_order failed for %s: %s  body=%s", order_id, exc, body[:200])
             return False
