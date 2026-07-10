@@ -1,22 +1,24 @@
-"""Launch the Polymarket trading bots: crypto + macro mispricing bots,
-a convergence bot, and a background trade indexer.
+"""Launch the Polymarket convergence bot and a background trade indexer.
 
-Bot design (mirrors run_all.py for Kalshi)
--------------------------------------------
-crypto (15s poll, 55% of balance)
-    Tags   : crypto-tagged markets
-    Win rates: computed from crypto-keyword-matched historical trades
+Bot design
+----------
+The crypto/macro mispricing bots (mirrored from run_all.py's Kalshi design)
+were removed here — checked the live Polymarket catalog and found none of
+its crypto/macro/politics-tagged markets are short-duration recurring
+brackets like Kalshi's KXBTC series (nearest close was 82 days out, median
+~175 days). Widening the close-time window to fit made the strategy return
+"opportunities" with implausible 40-60pp edges: the win-rate calibration
+table is built from ~2,100 resolved markets of every type mixed together
+(sports, politics, weather, ...), which reflects short-duration mispricing,
+not the very different kind of uncertainty in a 6-month-out speculative
+forecast. Applying it there isn't a real edge, it's a mismatched model.
 
-macro  (30s poll, 45% of balance)
-    Tags   : politics/economy-tagged markets
-    Win rates: computed from politics/economy-keyword-matched historical trades
+The convergence bot survives: it doesn't use that price-based win-rate
+table at all (live spot price + a volatility diffusion model instead), so
+it isn't affected by this issue. It just won't fire until Polymarket lists
+short-duration crypto threshold markets, since none currently exist.
 
-Because Position/Order carry no tag, slot accounting is account-wide across
-both bots by design (see the "DEDUP ACROSS BOTS" note in bot.py) — balance
-fractions are what keep the two bots from racing each other for the same
-dollars.
-
-A single shared indexer thread refreshes local trade data every 30 minutes.
+A single indexer thread refreshes local trade data every 30 minutes.
 
 Usage
 -----
@@ -46,10 +48,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from src.common.event_exposure import EventExposureTracker
 from src.trading.mode import is_paper_mode, log_mode_banner
-from src.trading.polymarket.bot import TradingBot, run_indexer_loop
+from src.trading.polymarket.bot import run_indexer_loop
 from src.trading.polymarket.convergence_bot import ConvergenceBot
-from src.trading.polymarket.learning import PerformanceTracker
-from src.trading.polymarket.strategy import MispricingStrategy
 from src.trading.polymarket.trading_client import PolymarketTradingClient
 
 # Max total spend on any single correlated real-world event per day, across
@@ -57,6 +57,8 @@ from src.trading.polymarket.trading_client import PolymarketTradingClient
 # couple of legitimate related bets without letting correlated risk stack
 # unbounded.
 MAX_EVENT_EXPOSURE_CENTS = 1500
+
+CRYPTO_TAGS = ["crypto"]
 
 
 def make_polymarket_client() -> PolymarketTradingClient:
@@ -66,92 +68,6 @@ def make_polymarket_client() -> PolymarketTradingClient:
         from src.trading.polymarket.paper_client import PaperPolymarketTradingClient
         return PaperPolymarketTradingClient(real_client=real)
     return real
-
-# ── Market universe split ──────────────────────────────────────────────────────
-
-CRYPTO_TAGS = ["crypto"]
-MACRO_TAGS = ["economy", "politics", "elections"]
-
-# ── Bot configurations ────────────────────────────────────────────────────────
-
-BOTS = [
-    {
-        "name": "crypto",
-        "tag_slugs": CRYPTO_TAGS,
-        "keywords": ["bitcoin", "ethereum", "solana", "dogecoin", "crypto"],
-        "poll_interval": 15,
-        "max_open_positions": 40,
-        "balance_fraction": 0.55,
-        "min_edge_pp": 0.5,
-        "max_spend_cents": 500,
-        "min_historical_trades": 30,
-        "min_entry_price": 18,
-        "max_entry_price": 55,
-        "min_close_seconds": 60,
-        "max_close_seconds": 3600,
-    },
-    {
-        "name": "macro",
-        "tag_slugs": MACRO_TAGS,
-        "keywords": ["fed", "inflation", "election", "president", "congress", "recession"],
-        "poll_interval": 30,
-        "max_open_positions": 40,
-        "balance_fraction": 0.45,
-        "min_edge_pp": 0.5,
-        "max_spend_cents": 500,
-        "min_historical_trades": 30,
-        "min_entry_price": 18,
-        "max_entry_price": 55,
-        "min_close_seconds": 60,
-        "max_close_seconds": 3600,
-    },
-]
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _run_bot(
-    cfg: dict,
-    stop_event: threading.Event,
-    tracker: PerformanceTracker,
-    client: PolymarketTradingClient,
-    event_tracker: EventExposureTracker,
-):
-    log = logging.getLogger(cfg["name"])
-    strategy = MispricingStrategy(
-        keywords=cfg["keywords"],
-        min_edge_pp=cfg["min_edge_pp"],
-        max_spend_cents=cfg["max_spend_cents"],
-        min_historical_trades=cfg["min_historical_trades"],
-        min_entry_price=cfg["min_entry_price"],
-        max_entry_price=cfg["max_entry_price"],
-        min_close_seconds=cfg["min_close_seconds"],
-        max_close_seconds=cfg["max_close_seconds"],
-        tracker=tracker,
-    )
-    bot = TradingBot(
-        client=client,
-        strategy=strategy,
-        poll_interval=cfg["poll_interval"],
-        max_open_positions=cfg["max_open_positions"],
-        balance_fraction=cfg["balance_fraction"],
-        tag_slugs=cfg["tag_slugs"],
-        tracker=tracker,
-        event_tracker=event_tracker,
-    )
-    log.info(
-        "Started — tags=%s  poll=%ds  balance_fraction=%.0f%%",
-        cfg["tag_slugs"],
-        cfg["poll_interval"],
-        cfg["balance_fraction"] * 100,
-    )
-    while not stop_event.is_set():
-        try:
-            bot._scan_once()
-        except Exception as exc:
-            log.error("Scan error: %s", exc, exc_info=True)
-        stop_event.wait(timeout=cfg["poll_interval"])
-    log.info("Stopped.")
 
 
 def main():
@@ -165,23 +81,12 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Shared learning tracker — persists across restarts, shared by both bots.
-    tracker = PerformanceTracker()
-
-    # One shared Polymarket client for every thread in this process. In
-    # paper mode this matters a lot: each PaperPolymarketTradingClient keeps
-    # its own in-memory ledger, so giving every thread a separate instance
-    # means their balance/position writes to the same ledger file race and
-    # clobber each other. One shared instance (with its own internal lock)
-    # is the single source of truth, exactly like the real account is for
-    # the real client.
     poly_client = make_polymarket_client()
 
-    # Caps total daily spend on any one correlated real-world event, shared
-    # across crypto/macro/convergence.
+    # Caps total daily spend on any one correlated real-world event.
     event_tracker = EventExposureTracker(MAX_EVENT_EXPOSURE_CENTS)
 
-    # Shared indexer — keeps local trade data fresh for both bots.
+    # Shared indexer — keeps local trade data fresh.
     indexer_thread = threading.Thread(
         target=run_indexer_loop,
         args=(stop_event, 1800),
@@ -190,20 +95,8 @@ def main():
     )
     indexer_thread.start()
 
-    threads = []
-    for cfg in BOTS:
-        t = threading.Thread(
-            target=_run_bot,
-            args=(cfg, stop_event, tracker, poly_client, event_tracker),
-            name=cfg["name"],
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
-
     # Convergence bot: bets crypto threshold markets whose outcome is >=93%
-    # certain from live spot prices. Independent signal source, shares the
-    # same Polymarket client/ledger.
+    # certain from live spot prices.
     def _run_convergence(stop_event):
         bot = ConvergenceBot(
             client=poly_client,
@@ -223,15 +116,12 @@ def main():
         target=_run_convergence, args=(stop_event,), name="convergence", daemon=True
     )
     conv_thread.start()
-    threads.append(conv_thread)
 
     logging.getLogger("launcher").info(
-        "%d bots + 1 convergence + 1 indexer running. Ctrl+C to stop.",
-        len(BOTS),
+        "1 convergence bot + 1 indexer running. Ctrl+C to stop.",
     )
 
-    for t in threads:
-        t.join()
+    conv_thread.join()
 
     poly_client.close()
     logging.getLogger("launcher").info("All stopped.")

@@ -247,8 +247,12 @@ class MispricingStrategy:
             secs = (market.end_time - now).total_seconds()
             if secs < self.min_close_seconds or secs > self.max_close_seconds:
                 continue
-            if market.end_time.date() > now.date():
-                continue
+            # No same-calendar-day requirement here (unlike the Kalshi
+            # version this was mirrored from) — Polymarket's crypto/macro
+            # markets aren't short-duration recurring brackets, they close
+            # weeks to months out (checked the live catalog: nothing closes
+            # same-day at all), so max_close_seconds alone is the real bound
+            # on how far out a bet can be.
 
             if not (market.yes_bid and market.yes_ask
                     and market.yes_bid > 0 and market.yes_ask > 0):
