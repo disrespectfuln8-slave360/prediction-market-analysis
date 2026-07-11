@@ -17,7 +17,10 @@ import os
 import sys
 from pathlib import Path
 
-LOCK_DIR = Path("data/locks")
+# Anchored to the repo root, NOT the process CWD — the logon-triggered
+# Task Scheduler jobs and manual launches must always collide on the same
+# lock file no matter where they were started from.
+LOCK_DIR = Path(__file__).resolve().parents[2] / "data" / "locks"
 
 
 def acquire_single_instance_lock(name: str):
