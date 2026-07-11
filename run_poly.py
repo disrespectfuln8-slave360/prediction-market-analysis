@@ -47,6 +47,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from src.common.event_exposure import EventExposureTracker
+from src.common.single_instance import acquire_single_instance_lock
 from src.trading.mode import is_paper_mode, log_mode_banner
 from src.trading.polymarket.bot import run_indexer_loop
 from src.trading.polymarket.convergence_bot import ConvergenceBot
@@ -64,15 +65,19 @@ CRYPTO_TAGS = ["crypto"]
 def make_polymarket_client() -> PolymarketTradingClient:
     """Real client in live mode; paper-simulated wrapper otherwise (default)."""
     real = PolymarketTradingClient()
-    if is_paper_mode():
+    if is_paper_mode("POLYMARKET"):
         from src.trading.polymarket.paper_client import PaperPolymarketTradingClient
         return PaperPolymarketTradingClient(real_client=real)
     return real
 
 
 def main():
+    # Held for the life of the process — a second copy exits immediately
+    # instead of racing this one for the same ledger/rate limits.
+    _instance_lock = acquire_single_instance_lock("run_poly")  # noqa: F841
+
     stop_event = threading.Event()
-    log_mode_banner("run_poly")
+    log_mode_banner("run_poly", "POLYMARKET")
 
     def _shutdown(sig, frame):
         logging.getLogger("launcher").info("Shutting down...")

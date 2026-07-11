@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -46,6 +47,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from src.common.event_exposure import EventExposureTracker
 from src.common.reservation import TickerReservation
+from src.common.single_instance import acquire_single_instance_lock
+from src.indexers.kalshi.market_snapshots import run_snapshot_loop
 from src.trading.kalshi.bot import TradingBot, run_indexer_loop
 from src.trading.kalshi.convergence_bot import ConvergenceBot
 from src.trading.kalshi.learning import PerformanceTracker
@@ -57,24 +60,31 @@ from src.trading.polymarket.trading_client import PolymarketTradingClient
 
 # Max total spend on any single correlated real-world event per day, across
 # every bot sharing the tracker — e.g. one BTC close hour's price brackets,
-# one game's markets. 3x a single max bet: enough room for a couple of
-# legitimate related bets without letting correlated risk stack unbounded.
+# one game's markets. Originally set as 3x the $5 max bet; now 15x the $1
+# max bet since it wasn't rescaled with the per-trade size change — still
+# a real cap, just one that now allows more individual bets to stack on the
+# same event before it kicks in.
 MAX_EVENT_EXPOSURE_CENTS = 1500
 
 
 def make_kalshi_client() -> KalshiTradingClient:
     """Real client in live mode; paper-simulated wrapper otherwise (default)."""
     real = KalshiTradingClient()
-    if is_paper_mode():
+    if is_paper_mode("KALSHI"):
         from src.trading.kalshi.paper_client import PaperKalshiTradingClient
         return PaperKalshiTradingClient(real_client=real)
     return real
 
 
 def make_polymarket_client() -> PolymarketTradingClient:
-    """Real client in live mode; paper-simulated wrapper otherwise (default)."""
+    """Real client in live mode; paper-simulated wrapper otherwise (default).
+
+    Gated on its own POLYMARKET_PAPER_TRADING flag, independent of Kalshi's —
+    there's no funded international Polymarket account, so this stays in
+    paper mode regardless of whether Kalshi goes live.
+    """
     real = PolymarketTradingClient()
-    if is_paper_mode():
+    if is_paper_mode("POLYMARKET"):
         from src.trading.polymarket.paper_client import PaperPolymarketTradingClient
         return PaperPolymarketTradingClient(real_client=real)
     return real
@@ -114,7 +124,7 @@ BOTS = [
         "max_open_positions": 40,            # allow deep position stack
         "balance_fraction": 0.55,
         "min_edge_pp": 0.5,
-        "max_spend_cents": 500,              # up to $5 per trade
+        "max_spend_cents": 100,               # up to $1 per trade
         "max_spread": 15,
         "min_historical_trades": 30,
         "min_entry_price": 18,
@@ -130,7 +140,7 @@ BOTS = [
         "max_open_positions": 40,
         "balance_fraction": 0.45,
         "min_edge_pp": 0.5,
-        "max_spend_cents": 500,              # up to $5 per trade
+        "max_spend_cents": 100,               # up to $1 per trade
         "max_spread": 15,
         "min_historical_trades": 30,
         "min_entry_price": 18,
@@ -174,6 +184,7 @@ def _run_bot(
         tracker=tracker,
         reservation=reservation,
         event_tracker=event_tracker,
+        pending_fills_path=Path(f"data/kalshi/pending_fills_{cfg['name']}.json"),
     )
     log.info(
         "Started — series=%s  poll=%ds  balance_fraction=%.0f%%",
@@ -191,8 +202,13 @@ def _run_bot(
 
 
 def main():
+    # Held for the life of the process — a second copy of run_all.py exits
+    # immediately instead of racing this one for the same files/rate limits.
+    _instance_lock = acquire_single_instance_lock("run_all")  # noqa: F841
+
     stop_event = threading.Event()
-    log_mode_banner("run_all")
+    log_mode_banner("run_all", "KALSHI")
+    log_mode_banner("run_all-poly-leg", "POLYMARKET")
 
     def _shutdown(sig, frame):
         logging.getLogger("launcher").info("Shutting down...")
@@ -233,6 +249,19 @@ def main():
     )
     indexer.start()
 
+    # Polls OPEN markets every 5 min to build a point-in-time liquidity time
+    # series (bid/ask/volume/open_interest) — data/kalshi/markets never
+    # captured this (see src/indexers/kalshi/market_snapshots.py docstring),
+    # which made any liquidity-based strategy feature untestable. Writes to
+    # a separate directory; does not touch the existing win-rate calibration data.
+    snapshot_indexer = threading.Thread(
+        target=run_snapshot_loop,
+        args=(stop_event, 300, all_series),
+        daemon=True,
+        name="market_snapshots",
+    )
+    snapshot_indexer.start()
+
     threads = []
     for cfg in BOTS:
         t = threading.Thread(
@@ -245,12 +274,25 @@ def main():
         threads.append(t)
 
     # Cross-platform arb scanner: Kalshi ↔ Polymarket sports markets.
+    # Only safe to auto-execute if EITHER leg can't actually place a real
+    # order (Kalshi still paper — nothing real happens either way) OR BOTH
+    # legs are genuinely live (Polymarket also live means it's actually
+    # funded and can really hedge). The dangerous combination is Kalshi live
+    # + Polymarket paper: a real Kalshi order with no funded account on the
+    # other side to hedge it — a naked directional bet, not the risk-free
+    # arb this is meant to be. There's no funded international Polymarket
+    # account (confirmed), so Polymarket stays in paper mode regardless of
+    # Kalshi, and this correctly disables auto-execution once Kalshi goes live.
     def _run_arb(stop_event):
         log = logging.getLogger("arb")
-        log.info("Arb scanner started — watching %s", ARB_SERIES)
+        can_execute = is_paper_mode("KALSHI") or not is_paper_mode("POLYMARKET")
+        log.info(
+            "Arb scanner started — watching %s (auto-execute=%s)",
+            ARB_SERIES, can_execute,
+        )
         run_arb_loop(
             kalshi_client, stop_event, ARB_SERIES,
-            execute_kalshi=True, poly_trading_client=poly_client,
+            execute_kalshi=can_execute, poly_trading_client=poly_client,
         )
 
     arb_thread = threading.Thread(
@@ -270,7 +312,7 @@ def main():
             min_edge_pp=3.0,
             min_close_secs=90,
             max_close_secs=600,
-            max_spend_cents=500,
+            max_spend_cents=100,
             poll_interval=20,
             reservation=reservation,
             event_tracker=event_tracker,

@@ -35,21 +35,36 @@ class ParquetStorage:
             self._existing_tickers = {row[0] for row in result}
         return self._existing_tickers
 
-    def append_markets(self, markets: list) -> int:
-        fetched_at = datetime.now(timezone.utc)
-        existing = self._load_existing_tickers()
+    def append_markets(self, markets: list, dedupe: bool = True) -> int:
+        """Append market records.
 
-        # Filter out duplicates
+        dedupe=True (default): permanent per-ticker dedup — once a ticker has
+        been written, it's skipped forever. Correct for a one-shot historical
+        backfill (don't re-fetch/re-store an already-captured finalized
+        market), which is the only thing that has ever called this method.
+
+        dedupe=False: always append every record, with its own fresh
+        _fetched_at. Needed for building a genuine time series of an OPEN
+        market's state (bid/ask/volume/open_interest) across repeated polls
+        — with dedupe=True, the second poll of the same still-open ticker
+        would be silently dropped forever, which is exactly why no
+        point-in-time liquidity data exists yet (see KalshiMarketSnapshotIndexer).
+        """
+        fetched_at = datetime.now(timezone.utc)
+        existing = self._load_existing_tickers() if dedupe else None
+
         records = []
         for market in markets:
-            if market.ticker not in existing:
-                record = asdict(market)
-                record["_fetched_at"] = fetched_at
-                records.append(record)
+            if dedupe and market.ticker in existing:
+                continue
+            record = asdict(market)
+            record["_fetched_at"] = fetched_at
+            records.append(record)
+            if dedupe:
                 existing.add(market.ticker)
 
         if not records:
-            return len(existing)
+            return len(existing) if existing is not None else 0
 
         new_df = pd.DataFrame(records)
         chunks = self._get_market_chunks()
@@ -57,7 +72,7 @@ class ParquetStorage:
         if not chunks:
             chunk_path = self._chunk_path(0, self.CHUNK_SIZE)
             new_df.to_parquet(chunk_path)
-            return len(existing)
+            return len(existing) if existing is not None else len(records)
 
         last_chunk = chunks[-1]
         last_df = pd.read_parquet(last_chunk)
@@ -74,4 +89,4 @@ class ParquetStorage:
             new_chunk_path = self._chunk_path(new_start, new_start + self.CHUNK_SIZE)
             remaining.to_parquet(new_chunk_path)
 
-        return len(existing)
+        return len(existing) if existing is not None else len(records)

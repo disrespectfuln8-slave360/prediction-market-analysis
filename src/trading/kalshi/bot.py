@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from src.common.event_exposure import EventExposureTracker
@@ -26,7 +29,14 @@ class _PendingFill:
     actually at risk (confirmed root cause of a real/paper P&L mismatch
     during the first live session: cancel_order was silently failing,
     leaving orders resting and eventually filling at stale prices, while
-    record_bet had already logged them as settled bets regardless)."""
+    record_bet had already logged them as settled bets regardless).
+
+    Persisted to disk (see TradingBot._save_pending_fills) so a bet doesn't
+    silently fall out of the learning data if the process restarts between
+    an order resting and its fill being confirmed — the position itself is
+    always safe either way (re-derived fresh from the exchange every scan),
+    this only protects the calibration record of that one bet's outcome.
+    """
     ticker: str
     series: str
     side: str
@@ -34,6 +44,24 @@ class _PendingFill:
     predicted_win_rate: float
     count: int
     close_time: Optional[datetime]
+
+    def to_json_dict(self) -> dict:
+        d = asdict(self)
+        d["close_time"] = self.close_time.isoformat() if self.close_time else None
+        return d
+
+    @classmethod
+    def from_json_dict(cls, d: dict) -> "_PendingFill":
+        close_time = d.get("close_time")
+        return cls(
+            ticker=d["ticker"],
+            series=d["series"],
+            side=d["side"],
+            entry_price=d["entry_price"],
+            predicted_win_rate=d["predicted_win_rate"],
+            count=d["count"],
+            close_time=datetime.fromisoformat(close_time) if close_time else None,
+        )
 
 
 def run_indexer_loop(
@@ -99,6 +127,7 @@ class TradingBot:
         tracker: Optional[PerformanceTracker] = None,
         reservation: Optional[TickerReservation] = None,
         event_tracker: Optional[EventExposureTracker] = None,
+        pending_fills_path: Optional[Path] = None,
     ):
         self.client = client
         self.strategy = strategy
@@ -116,6 +145,42 @@ class TradingBot:
         # order_id -> _PendingFill, for orders placed but not yet confirmed
         # filled (see _PendingFill docstring).
         self._pending_fills: dict[str, _PendingFill] = {}
+        self._pending_fills_path = pending_fills_path
+        if self._pending_fills_path:
+            self._load_pending_fills()
+
+    def _load_pending_fills(self):
+        path = self._pending_fills_path
+        if not path or not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text())
+            self._pending_fills = {
+                order_id: _PendingFill.from_json_dict(d) for order_id, d in raw.items()
+            }
+            if self._pending_fills:
+                logger.info(
+                    "Loaded %d pending fill(s) from a prior run — will be "
+                    "reconciled against live positions on the first scan",
+                    len(self._pending_fills),
+                )
+        except Exception as exc:
+            logger.warning("Failed to load pending fills from %s: %s", path, exc)
+
+    def _save_pending_fills(self):
+        path = self._pending_fills_path
+        if not path:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
+                {oid: pf.to_json_dict() for oid, pf in self._pending_fills.items()},
+                indent=2,
+            ))
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning("Failed to save pending fills to %s: %s", path, exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -144,11 +209,13 @@ class TradingBot:
             return
         still_open_ids = {o.order_id for o in open_orders}
         net_by_ticker = {p.ticker: p.position for p in positions}
+        resolved_any = False
 
         for order_id, pending in list(self._pending_fills.items()):
             if order_id in still_open_ids:
                 continue  # still resting — check again next cycle
             del self._pending_fills[order_id]
+            resolved_any = True
             net = net_by_ticker.get(pending.ticker, 0)
             filled = (pending.side == "yes" and net > 0) or (pending.side == "no" and net < 0)
             if not filled:
@@ -179,6 +246,9 @@ class TradingBot:
                         "learning data may be incomplete: %s",
                         order_id, pending.ticker, exc,
                     )
+
+        if resolved_any:
+            self._save_pending_fills()
 
     def _limit_price(self, opp: Opportunity) -> tuple[int, int]:
         """Return (limit_price_in_side_cents, yes_price_for_api) for a maker order.
@@ -311,6 +381,7 @@ class TradingBot:
                     count=opp.count,
                     close_time=opp.market.close_time,
                 )
+                self._save_pending_fills()
             held.add(opp.market.ticker)
             remaining -= cost
             placed += 1
@@ -377,7 +448,7 @@ class TradingBot:
             self.strategy.reload_win_rates()
             self._last_reload = now
 
-        if not self.strategy.win_rates:
+        if not self.strategy.win_rates.get("yes") and not self.strategy.win_rates.get("no"):
             logger.warning("No historical data yet — run the indexer first.")
             return
 
@@ -425,7 +496,12 @@ class TradingBot:
             if n_settled:
                 logger.info("Learning: settled %d bet(s) this cycle", n_settled)
 
-        opps = self.strategy.find_opportunities(markets, held | self._dead_tickers)
+        # held (real positions + resting orders) blocks whole events; dead
+        # tickers (410-gone markets) only block themselves — a vanished
+        # bracket must not lock out its siblings.
+        opps = self.strategy.find_opportunities(
+            markets, held | self._dead_tickers, event_blocked_tickers=held
+        )
 
         logger.info(
             "[%s] balance=$%.2f (budget=$%.2f)  markets=%d  opps=%d  positions=%d  slots=%d",

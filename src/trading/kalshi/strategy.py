@@ -72,6 +72,27 @@ def event_key(ticker: str) -> str:
     return parts[0]
 
 
+# Series that are different wrappers around the SAME underlying — e.g. hourly
+# brackets, 15-minute brackets, and daily thresholds on the BTC price. Bets
+# across these series with the same close time resolve off the same number,
+# so they must share one dedup/exposure key. (When ticker_prefixes contains
+# e.g. "KXBTC", _ticker_series already collapses KXBTCD/KXBTC15M into it by
+# prefix match; this map makes the grouping explicit and config-independent.)
+SERIES_UNDERLYING = {
+    "KXBTCD": "KXBTC",
+    "KXBTC15M": "KXBTC",
+    "KXETHD": "KXETH",
+    "KXETH15M": "KXETH",
+    "KXSOLD": "KXSOL",
+    "KXSOL15M": "KXSOL",
+}
+
+
+def normalize_series(series: str) -> str:
+    """Collapse sibling series onto their shared underlying."""
+    return SERIES_UNDERLYING.get(series, series)
+
+
 class MispricingStrategy:
     """Find open markets where current ask price is below the historical win rate.
 
@@ -113,12 +134,22 @@ class MispricingStrategy:
         self.min_close_seconds = min_close_seconds
         self.max_close_seconds = max_close_seconds
         self.tracker = tracker
-        self._win_rates: Optional[dict[int, float]] = None
+        self._win_rates: Optional[dict[str, dict[int, float]]] = None
 
     # ── Win rate loading ──────────────────────────────────────────────────────
 
-    def _query_win_rates(self, prefixes: Optional[list[str]]) -> dict[int, float]:
-        """Run the win-rate SQL query, optionally scoped to ticker prefixes."""
+    def _query_win_rates(self, prefixes: Optional[list[str]]) -> dict[str, dict[int, float]]:
+        """Run the win-rate SQL query, split by taker side, optionally scoped
+        to ticker prefixes.
+
+        Split by side rather than pooled: confirmed against the live paper-
+        trading record that a pooled table systematically mispredicts NO
+        bets specifically (e.g. 10-29c NO bets were winning 9-12% of the
+        time against a pooled-model prediction of 22-29% — the model was
+        off by roughly 2-3x). A pooled table doesn't just blend two similar
+        distributions, it silently assumes YES-takers and NO-takers at the
+        same price have the same win rate, which the data shows is false.
+        """
         prefix_clause = ""
         if prefixes:
             conditions = " OR ".join(f"ticker LIKE '{p}%'" for p in prefixes)
@@ -134,43 +165,57 @@ class MispricingStrategy:
                 ),
                 taker_positions AS (
                     SELECT
+                        t.taker_side,
                         CASE WHEN t.taker_side = 'yes' THEN t.yes_price ELSE t.no_price END AS price,
                         CASE WHEN t.taker_side = m.result THEN 1 ELSE 0 END AS won
                     FROM '{self.trades_dir}/*.parquet' t
                     INNER JOIN resolved m ON t.ticker = m.ticker
                 )
                 SELECT
+                    taker_side,
                     price,
                     COUNT(*) AS n,
                     100.0 * SUM(won) / COUNT(*) AS win_rate
                 FROM taker_positions
                 WHERE price BETWEEN 1 AND 99
-                GROUP BY price
+                GROUP BY taker_side, price
                 HAVING COUNT(*) >= {self.min_historical_trades}
-                ORDER BY price
+                ORDER BY taker_side, price
             """).df()
 
-        return {int(row.price): row.win_rate for _, row in df.iterrows()}
+        rates: dict[str, dict[int, float]] = {"yes": {}, "no": {}}
+        for _, row in df.iterrows():
+            rates[row.taker_side][int(row.price)] = row.win_rate
+        return rates
 
-    def _load_win_rates(self) -> dict[int, float]:
+    def _load_win_rates(self) -> dict[str, dict[int, float]]:
         if not list(self.trades_dir.glob("*.parquet")):
-            return {}
+            return {"yes": {}, "no": {}}
 
         rates = self._query_win_rates(self.ticker_prefixes)
+        global_rates: Optional[dict[str, dict[int, float]]] = None
 
         # Fall back to global rates when category-specific data is too sparse
-        if self.ticker_prefixes and len(rates) < 5:
-            logger.info(
-                "Only %d category-specific win rate points — falling back to global rates",
-                len(rates),
-            )
-            rates = self._query_win_rates(None)
+        # -- independently per side, since one side can be sparse while the
+        # other has plenty (e.g. a series traded mostly one direction).
+        for side in ("yes", "no"):
+            if self.ticker_prefixes and len(rates[side]) < 5:
+                if global_rates is None:
+                    global_rates = self._query_win_rates(None)
+                logger.info(
+                    "Only %d category-specific %s win rate points — falling back to global rates",
+                    len(rates[side]), side,
+                )
+                rates[side] = global_rates[side]
 
-        logger.info("Win rates loaded: %d price points", len(rates))
+        logger.info(
+            "Win rates loaded: %d YES price points, %d NO price points",
+            len(rates["yes"]), len(rates["no"]),
+        )
         return rates
 
     @property
-    def win_rates(self) -> dict[int, float]:
+    def win_rates(self) -> dict[str, dict[int, float]]:
         if self._win_rates is None:
             self._win_rates = self._load_win_rates()
         return self._win_rates
@@ -200,27 +245,62 @@ class MispricingStrategy:
             spend = int(spend * self.tracker.confidence_multiplier(series))
         return spend // price_cents
 
-    def _interpolate_win_rate(self, price: int) -> Optional[float]:
-        """Return win rate at price, interpolating between nearest known points."""
-        if price in self.win_rates:
-            return self.win_rates[price]
-        keys = sorted(self.win_rates.keys())
+    def _interpolate_win_rate(self, price: int, side: str) -> Optional[float]:
+        """Return win rate at price for this side, interpolating between
+        nearest known points on that side's own table."""
+        table = self.win_rates.get(side, {})
+        if price in table:
+            return table[price]
+        keys = sorted(table.keys())
         lo = [k for k in keys if k < price]
         hi = [k for k in keys if k > price]
         if not lo or not hi:
             return None
         p0, p1 = lo[-1], hi[0]
-        w0, w1 = self.win_rates[p0], self.win_rates[p1]
+        w0, w1 = table[p0], table[p1]
         return w0 + (w1 - w0) * (price - p0) / (p1 - p0)
 
     # ── Signal generation ─────────────────────────────────────────────────────
 
     def find_opportunities(
-        self, markets: list[Market], held_tickers: set[str]
+        self,
+        markets: list[Market],
+        held_tickers: set[str],
+        event_blocked_tickers: Optional[set[str]] = None,
     ) -> list[Opportunity]:
-        """Return mispriced markets sorted by edge descending."""
-        if not self.win_rates:
+        """Return mispriced markets sorted by edge descending.
+
+        held_tickers: exact tickers to never bet on (positions, open orders,
+        dead/410 tickers).
+
+        event_blocked_tickers: tickers whose whole EVENT is off-limits —
+        real held exposure only, not dead tickers (a 410'd bracket must not
+        block its siblings). Defaults to held_tickers. This closes the
+        cross-scan leak the end-of-scan dedup can't see: dedup picks one
+        bracket per event per scan, but nothing stopped scan N+1 from adding
+        an adjacent (mutually exclusive) bracket of the same event once
+        prices drifted — the live ledger accumulated 4 adjacent YES brackets
+        on one BTC close hour, and contradictory YES>64199.99 + NO>63999.99
+        threshold bets on the same close, each pair guaranteed to lose at
+        least one leg.
+        """
+        if not self.win_rates.get("yes") and not self.win_rates.get("no"):
             return []
+
+        blocked = event_blocked_tickers if event_blocked_tickers is not None else held_tickers
+        held_events = {event_key(t) for t in blocked}
+        # (normalized series, close_time) of held exposure — catches sibling
+        # series on the same underlying/close (KXBTC vs KXBTCD vs KXBTC15M)
+        # that event_key's string grouping can't. Only resolvable for held
+        # tickers still present in this scan's market list.
+        by_ticker = {m.ticker: m for m in markets}
+        held_series_close: set[tuple] = set()
+        for t in blocked:
+            m = by_ticker.get(t)
+            if m is not None and m.close_time:
+                held_series_close.add(
+                    (normalize_series(self._ticker_series(t)), m.close_time)
+                )
 
         opps: list[Opportunity] = []
         for market in markets:
@@ -254,6 +334,14 @@ class MispricingStrategy:
 
             series = self._ticker_series(market.ticker)
 
+            # One position per real-world event at a time (see docstring) —
+            # never add a second bracket/strike/side of an event we already
+            # have exposure on.
+            if event_key(market.ticker) in held_events:
+                continue
+            if (normalize_series(series), market.close_time) in held_series_close:
+                continue
+
             # Circuit breaker — skip this whole category if it's proven a
             # loser across all sides/prices, not just underperforming in one
             # price bucket (which get_edge_adjustment below already handles).
@@ -265,7 +353,7 @@ class MispricingStrategy:
 
             # YES side: pay yes_ask, win if YES resolves
             if self.min_entry_price <= market.yes_ask <= self.max_entry_price:
-                wr_yes = self._interpolate_win_rate(market.yes_ask)
+                wr_yes = self._interpolate_win_rate(market.yes_ask, "yes")
                 if wr_yes is not None:
                     edge = wr_yes - market.yes_ask
                     # Apply learned adjustment — raises required edge if this
@@ -286,12 +374,14 @@ class MispricingStrategy:
                                 count=count,
                             ))
 
-            # NO side: pay no_ask, win if NO resolves
+            # NO side: pay no_ask, win if NO resolves. Looked up directly on
+            # the NO-takers' own table now (see _query_win_rates docstring)
+            # — previously this inverted the YES table via 100-no_ask, which
+            # implicitly assumed YES-takers and NO-takers at complementary
+            # prices win at complementary rates. Real data shows they don't.
             if market.no_ask and self.min_entry_price <= market.no_ask <= self.max_entry_price:
-                yes_equiv = 100 - market.no_ask
-                no_wr_raw = self._interpolate_win_rate(yes_equiv)
-                if no_wr_raw is not None:
-                    no_wr = 100.0 - no_wr_raw
+                no_wr = self._interpolate_win_rate(market.no_ask, "no")
+                if no_wr is not None:
                     edge = no_wr - market.no_ask
                     learned_adj = (
                         self.tracker.get_edge_adjustment(series, "no", market.no_ask)
@@ -309,13 +399,15 @@ class MispricingStrategy:
                                 count=count,
                             ))
 
-        # Dedup: for each (series, close_time) keep only the highest-edge opportunity.
-        # Price brackets for the same expiry are mutually exclusive — BTC can only close
-        # in one bracket, so betting on multiple adjacent brackets means you're guaranteed
-        # to lose all but one. Same applies to both sides of a sports game.
+        # Dedup: for each (underlying, close_time) keep only the highest-edge
+        # opportunity. Price brackets for the same expiry are mutually exclusive —
+        # BTC can only close in one bracket, so betting on multiple adjacent
+        # brackets means you're guaranteed to lose all but one. Same applies to
+        # both sides of a sports game. Series are normalized so sibling series
+        # on the same underlying (hourly/15-min/daily BTC) dedup together.
         best_per_event: dict[tuple, Opportunity] = {}
         for opp in opps:
-            series = self._ticker_series(opp.market.ticker)
+            series = normalize_series(self._ticker_series(opp.market.ticker))
             close = opp.market.close_time
             key = (series, close)
             if key not in best_per_event or opp.edge > best_per_event[key].edge:
