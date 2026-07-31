@@ -182,8 +182,9 @@ class PolymarketUSTradingClient:
         side: str,
         count: int,
         yes_price: int,
+        immediate_or_cancel: bool = False,
     ) -> Order:
-        """Place a GTC limit order.
+        """Place a limit order.
 
         Args:
             market_slug: Market slug.
@@ -193,6 +194,19 @@ class PolymarketUSTradingClient:
                 pass the YES-equivalent (100 - no_price), matching the
                 Kalshi/international-Polymarket client convention used
                 elsewhere in this codebase.
+            immediate_or_cancel: Fill what crosses right now and let the
+                exchange kill the rest. Strongly preferred for hedged
+                strategies — a GTC remainder can fill at any later moment,
+                including in the window where the caller is cancelling it.
+
+        The returned status is "filled" only when the response actually says
+        so. It is "unknown" — never "resting" — when the response carries no
+        execution information, because this API has been observed returning
+        an empty executions array for orders that filled completely (both
+        legs of the 2026-07-30 incident, and both flattening sells after it).
+        Treating that silence as "did not fill" is what stranded real
+        positions the bot believed it had cancelled. Callers that care must
+        reconcile against get_positions(), not this field.
         """
         intent = "ORDER_INTENT_BUY_LONG" if side == "yes" else "ORDER_INTENT_BUY_SHORT"
         price_cents = yes_price if side == "yes" else (100 - yes_price)
@@ -202,19 +216,66 @@ class PolymarketUSTradingClient:
             "type": "ORDER_TYPE_LIMIT",
             "price": {"value": f"{price_cents / 100:.2f}", "currency": "USD"},
             "quantity": count,
-            "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "tif": (
+                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if immediate_or_cancel
+                else "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+            ),
         }
         data = self.order_http.post("/v1/orders", json=payload)
-        executions = data.get("executions", []) or []
-        filled = sum(int(float(e.get("lastShares", 0) or 0)) for e in executions)
+
+        filled = data.get("cumQuantity")
+        if filled is None:
+            executions = data.get("executions", []) or []
+            filled = (
+                sum(int(float(e.get("lastShares", 0) or 0)) for e in executions)
+                if executions else None
+            )
+
+        if filled is None:
+            status = "unknown"
+        elif int(float(filled)) >= count:
+            status = "filled"
+        else:
+            status = "resting"
+
         return Order(
             order_id=data.get("id", ""),
             market_slug=market_slug,
             side=side,
             count=count,
             price_cents=yes_price,
-            status="filled" if filled >= count else "resting",
+            status=status,
         )
+
+    def close_long(self, market_slug: str, count: int, price_cents: int) -> tuple[str, int]:
+        """Sell an existing long position. Returns (order_id, contracts_sold).
+
+        Immediate-or-cancel, not good-till-cancel, and that choice is the whole
+        point: a resting sell order on an illiquid book can partially fill at
+        any moment, and a cancel racing that fill is what left this account
+        holding unhedged legs the bot had already written off. IOC either
+        crosses now or is dead — there is no remainder to reconcile later.
+
+        Fill count comes from cumQuantity (the order's own running total),
+        falling back to summing executions. The bot's place_order reads only
+        the executions array, which reports nothing when a fill lands after
+        the response is serialized — that silent zero is what made a real
+        position look like a no-op.
+        """
+        payload = {
+            "marketSlug": market_slug,
+            "intent": "ORDER_INTENT_SELL_LONG",
+            "type": "ORDER_TYPE_LIMIT",
+            "price": {"value": f"{price_cents / 100:.2f}", "currency": "USD"},
+            "quantity": count,
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        }
+        data = self.order_http.post("/v1/orders", json=payload)
+        sold = data.get("cumQuantity")
+        if sold is None:
+            executions = data.get("executions", []) or []
+            sold = sum(int(float(e.get("lastShares", 0) or 0)) for e in executions)
+        return data.get("id", ""), int(float(sold or 0))
 
     def cancel_order(self, order_id: str, market_slug: str) -> bool:
         try:

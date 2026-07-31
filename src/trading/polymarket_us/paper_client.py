@@ -152,7 +152,19 @@ class PaperPolymarketUSTradingClient:
         # Paper fills are immediate — nothing ever rests.
         return []
 
-    def place_order(self, market_slug: str, side: str, count: int, yes_price: int) -> Order:
+    def place_order(
+        self,
+        market_slug: str,
+        side: str,
+        count: int,
+        yes_price: int,
+        immediate_or_cancel: bool = False,
+    ) -> Order:
+        # immediate_or_cancel is accepted to keep this a drop-in for the real
+        # client. It changes nothing here: paper fills are already immediate
+        # and total, so IOC and GTC are indistinguishable in simulation. That
+        # is precisely why the live-only fill-reporting bug could not have
+        # been caught in paper mode.
         price_paid = yes_price if side == "yes" else (100 - yes_price)
         price_paid = max(1, min(99, price_paid))
         cost = price_paid * count
@@ -179,6 +191,33 @@ class PaperPolymarketUSTradingClient:
             order_id=order_id, market_slug=market_slug, side=side,
             count=count, price_cents=yes_price, status="filled",
         )
+
+    def close_long(self, market_slug: str, count: int, price_cents: int) -> tuple:
+        """Sell `count` of a simulated long. Returns (order_id, sold)."""
+        with self._lock:
+            leg = self._positions.get(market_slug)
+            held = leg.get("yes", 0) if leg else 0
+            sold = min(count, held)
+            if sold <= 0:
+                return f"paper-{uuid.uuid4().hex[:12]}", 0
+            leg["yes"] = held - sold
+            if leg.get("yes", 0) == 0 and leg.get("no", 0) == 0:
+                self._positions.pop(market_slug, None)
+            proceeds = sold * price_cents
+            self._cash_cents += proceeds
+            order_id = f"paper-{uuid.uuid4().hex[:12]}"
+            self._trade_log.append({
+                "order_id": order_id, "market_slug": market_slug, "side": "sell_long",
+                "count": sold, "price_cents": price_cents, "ts": time.time(),
+            })
+            cash_now = self._cash_cents
+            self._save_locked()
+
+        logger.info(
+            "[paper] SOLD %dx %s @ %d¢ (proceeds=%d¢, cash=$%.2f)",
+            sold, market_slug, price_cents, proceeds, cash_now / 100,
+        )
+        return order_id, sold
 
     def cancel_order(self, order_id: str, market_slug: str = "") -> bool:
         # Nothing rests in paper mode, so there's never anything to cancel.
