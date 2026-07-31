@@ -63,6 +63,60 @@ def test_one_sided_book_is_not_traded():
     assert find_ladder_locks(markets, set(), budget_cents=500) == []
 
 
+def test_before_round_ladder_runs_the_other_direction():
+    """"Fight ends before Round N" nests the opposite way from "N+ goals".
+
+    before(2) implies before(3), so the LOWER rung is the subset and price
+    must rise with N. A violation is the low rung bid ABOVE the high rung
+    ask — the mirror image of the gte case.
+    """
+    markets = [
+        make_market("ufc-x-rof-before-r2", yes_bid=50, yes_ask=52),
+        make_market("ufc-x-rof-before-r3", yes_bid=38, yes_ask=40),
+    ]
+    locks = find_ladder_locks(markets, set(), budget_cents=500)
+    assert len(locks) == 1
+    lock = locks[0]
+    assert lock.family == "before_round"
+    # YES goes on r3 (the implied, superset event), NO on r2 (the implier).
+    assert lock.buy_slug == "ufc-x-rof-before-r3"
+    assert lock.sell_slug == "ufc-x-rof-before-r2"
+    assert lock.edge_cents == 10
+
+
+def test_before_round_correct_ordering_is_not_traded():
+    """Prices already rising with N is coherent — there is no arb."""
+    markets = [
+        make_market("ufc-x-rof-before-r2", yes_bid=38, yes_ask=40),
+        make_market("ufc-x-rof-before-r3", yes_bid=50, yes_ask=52),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
+def test_win_in_round_markets_are_never_traded_as_a_ladder():
+    """`-rov-f1-rN` are mutually exclusive outcomes, not nested ones.
+
+    Winning in round 1 does not imply winning in round 2, so pricing them
+    as a ladder would be a directional bet dressed up as arbitrage. These
+    must not match any family no matter how the prices sit.
+    """
+    markets = [
+        make_market("ufc-x-rov-f1-r1", yes_bid=50, yes_ask=52),
+        make_market("ufc-x-rov-f1-r2", yes_bid=38, yes_ask=40),
+        make_market("ufc-x-rov-f1-r3", yes_bid=20, yes_ask=22),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
+def test_families_are_never_paired_with_each_other():
+    """Two families under one prefix must not be cross-matched."""
+    markets = [
+        make_market("evt-gte1", yes_bid=38, yes_ask=40),
+        make_market("evt-before-r1", yes_bid=90, yes_ask=92),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
 def test_tight_book_violation_is_still_found():
     markets = [
         make_market("x-gte1", yes_bid=38, yes_ask=40),

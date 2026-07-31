@@ -3,24 +3,45 @@
 polymarket.us has no crypto/short-duration markets (confirmed by scanning
 9,500+ live active markets — it's almost entirely sports player-props and
 futures), so the convergence-bot approach used elsewhere in this repo
-doesn't apply here. Instead this targets a real structural feature: many
-player-stat markets come in threshold "ladders" — e.g.
-`...-fwcmikoya-gte1`, `...-gte2`, `...-gte3` for "1+ goals", "2+ goals",
-"3+ goals" on the same player/game. Since gte(n) implies gte(n-1), the
-probability (and therefore price) of gte(n) must be non-increasing in n.
-This is a mathematical constraint on any coherent pricing, not a
-probability estimate, so — unlike the crypto/macro mispricing bots that
-were removed elsewhere in this repo for relying on a miscalibrated model
-with no supporting data — trading a violation of it needs no historical
-calibration.
+doesn't apply here. Instead this targets a real structural feature: markets
+that come in families where one outcome logically implies another, so their
+prices are constrained by arithmetic rather than by anyone's forecast.
 
-The arbitrage: buy YES on the lower rung (m1) and buy NO on the higher
-rung (m2). Payoff is >= $1/contract in every possible outcome (worked out
-below), so whenever cost < $1/contract (i.e. m1.yes_ask < m2.yes_bid) it's
-a guaranteed profit:
-  - stat >= n2 (implies >= n1): YES1 pays $1, NO2 pays $0  -> $1
-  - n1 <= stat < n2:            YES1 pays $1, NO2 pays $1  -> $2
-  - stat < n1 (implies < n2):   YES1 pays $0, NO2 pays $1  -> $1
+The general form
+----------------
+Whenever event X implies event Y, coherent pricing requires P(X) <= P(Y).
+Buy YES on Y and NO on X and the payoff is >= $1/contract in every state:
+
+  - X happens (so Y happens): YES_Y pays $1, NO_X pays $0  -> $1
+  - Y without X:              YES_Y pays $1, NO_X pays $1  -> $2
+  - neither:                  YES_Y pays $0, NO_X pays $1  -> $1
+
+Cost is ask(Y) + (100 - bid(X)), so the trade is free money exactly when
+bid(X) > ask(Y). This is a mathematical constraint, not a probability
+estimate, so — unlike the crypto/macro mispricing bots that were removed
+elsewhere in this repo for relying on a miscalibrated model with no
+supporting data — trading a violation of it needs no historical calibration.
+
+Which families qualify
+----------------------
+The implication direction is a property of what the market *means*, and it
+is not always the direction the slug numbering suggests:
+
+  `-gteN`        "N+ goals". gte(n) implies gte(n-1), so the subset is the
+                 HIGHER-numbered rung and prices fall as N rises.
+  `-before-rN`   "Fight ends before Round N begins". before(n) implies
+                 before(n+1), so the subset is the LOWER-numbered rung and
+                 prices RISE as N rises — the opposite direction.
+
+Getting that backwards turns a hedge into a doubled directional bet, so
+each family declares its direction explicitly rather than inferring one.
+
+Not every numbered family is a ladder at all. `-rov-f1-rN` ("Gamrot in
+Round 1", "...Round 2") are mutually exclusive outcomes — winning in round
+1 does not imply winning in round 2 — and pricing them as nested would
+manufacture losses while logging them as guaranteed profit. Families are
+therefore an explicit allowlist of verified patterns, never a general
+"slug ends in a number" rule. Read the market titles before adding one.
 """
 from __future__ import annotations
 
@@ -29,8 +50,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.trading.polymarket_us.models import Market
-
-LADDER_RE = re.compile(r"^(.*-gte)(\d+)$")
 
 MIN_EDGE_CENTS = 1  # smallest guaranteed profit per contract worth acting on
 MAX_PLAUSIBLE_EDGE_CENTS = 20  # bigger than this is far more likely stale/bad data than real free money
@@ -53,15 +72,40 @@ MAX_SPREAD_CENTS = 20
 # entire catalogue and silently disables the strategy.
 
 
+@dataclass(frozen=True)
+class LadderFamily:
+    """A set of markets whose outcomes nest, and which way the nesting runs.
+
+    `subset_is_higher_index` says which rung implies the other: True when the
+    higher-numbered rung is the stricter event (gte3 implies gte2), False
+    when the lower-numbered one is (before-r2 implies before-r3).
+    """
+
+    name: str
+    regex: re.Pattern
+    subset_is_higher_index: bool
+
+
+LADDER_FAMILIES = (
+    # "N+ goals / hits / strikeouts" player-prop threshold ladders.
+    LadderFamily("gte", re.compile(r"^(.*-gte)(\d+)$"), subset_is_higher_index=True),
+    # "Fight ends before Round N begins". Deliberately anchored on
+    # `-before-r` and not `-r`, so it cannot pick up the `-rov-f1-rN`
+    # win-in-round-N markets, which are mutually exclusive rather than nested.
+    LadderFamily("before_round", re.compile(r"^(.*-before-r)(\d+)$"), subset_is_higher_index=False),
+)
+
+
 @dataclass
 class LadderLock:
-    buy_slug: str  # lower threshold market — buy YES here
-    buy_price: int  # yes_ask, cents
-    sell_slug: str  # higher threshold market — buy NO here
-    sell_price: int  # yes_bid, cents (NO costs 100 - sell_price)
+    buy_slug: str  # the implied (superset) market — buy YES here
+    buy_price: int  # its yes_ask, cents
+    sell_slug: str  # the implying (subset) market — buy NO here
+    sell_price: int  # its yes_bid, cents (NO costs 100 - sell_price)
     count: int
     edge_cents: int  # guaranteed profit per contract
     total_cost_cents: int  # both legs together — a live caller must gate on this, see below
+    family: str = "gte"  # which LadderFamily produced this, for logging
 
 
 def _has_tradeable_book(m: Market) -> bool:
@@ -73,15 +117,20 @@ def _has_tradeable_book(m: Market) -> bool:
     return (m.yes_ask - m.yes_bid) <= MAX_SPREAD_CENTS
 
 
-def _group_ladders(markets: list[Market]) -> dict[str, list[tuple[int, Market]]]:
-    groups: dict[str, list[tuple[int, Market]]] = {}
+def _group_ladders(markets: list[Market]) -> dict[tuple, list[tuple[int, Market]]]:
+    """Group rungs by (family, shared prefix). Keyed on the family too so two
+    families that happen to share a prefix can never be paired together."""
+    groups: dict[tuple, list[tuple[int, Market]]] = {}
     for m in markets:
-        match = LADDER_RE.match(m.slug)
-        if not match:
-            continue
         if not _has_tradeable_book(m):
             continue
-        groups.setdefault(match.group(1), []).append((int(match.group(2)), m))
+        for family in LADDER_FAMILIES:
+            match = family.regex.match(m.slug)
+            if match:
+                groups.setdefault((family.name, match.group(1)), []).append(
+                    (int(match.group(2)), m)
+                )
+                break
     return groups
 
 
@@ -109,7 +158,7 @@ def find_ladder_locks(
     held: Optional[set] = None,
     budget_cents: int = DEFAULT_LOCK_BUDGET_CENTS,
 ) -> list[LadderLock]:
-    """Ladder violations sized to fit `budget_cents` per lock.
+    """Monotonicity violations sized to fit `budget_cents` per lock.
 
     Callers trading a real account must pass their actual buying power
     (see LadderArbBot._scan_once) — the default is only a sensible size
@@ -117,34 +166,43 @@ def find_ladder_locks(
     """
     held = held or set()
     locks: list[LadderLock] = []
+    by_name = {f.name: f for f in LADDER_FAMILIES}
 
-    for rungs in _group_ladders(markets).values():
+    for (family_name, _prefix), rungs in _group_ladders(markets).items():
+        family = by_name[family_name]
         rungs.sort(key=lambda t: t[0])
-        best: Optional[tuple[int, Market, Market]] = None  # (edge, m1, m2)
+        best: Optional[tuple[int, Market, Market]] = None  # (edge, superset, subset)
+
         for i in range(len(rungs)):
-            _, m1 = rungs[i]
-            if m1.yes_ask is None or m1.slug in held:
-                continue
             for j in range(i + 1, len(rungs)):
-                _, m2 = rungs[j]
-                if m2.yes_bid is None or m2.slug in held:
+                lower, higher = rungs[i][1], rungs[j][1]
+                # The subset is the stricter event; it must not price above
+                # the event it implies.
+                subset, superset = (
+                    (higher, lower) if family.subset_is_higher_index else (lower, higher)
+                )
+                if subset.slug in held or superset.slug in held:
                     continue
-                edge = m2.yes_bid - m1.yes_ask
+                if subset.yes_bid is None or superset.yes_ask is None:
+                    continue
+                edge = subset.yes_bid - superset.yes_ask
                 if edge < MIN_EDGE_CENTS or edge > MAX_PLAUSIBLE_EDGE_CENTS:
                     continue
                 if best is None or edge > best[0]:
-                    best = (edge, m1, m2)
+                    best = (edge, superset, subset)
+
         if best is None:
             continue
-        edge, m1, m2 = best
-        count = _size_lock(m1.yes_ask, m2.yes_bid, budget_cents)
+        edge, superset, subset = best
+        count = _size_lock(superset.yes_ask, subset.yes_bid, budget_cents)
         if count <= 0:
             continue
         locks.append(LadderLock(
-            buy_slug=m1.slug, buy_price=m1.yes_ask,
-            sell_slug=m2.slug, sell_price=m2.yes_bid,
+            buy_slug=superset.slug, buy_price=superset.yes_ask,
+            sell_slug=subset.slug, sell_price=subset.yes_bid,
             count=count, edge_cents=edge,
-            total_cost_cents=(m1.yes_ask + (100 - m2.yes_bid)) * count,
+            total_cost_cents=(superset.yes_ask + (100 - subset.yes_bid)) * count,
+            family=family.name,
         ))
 
     return locks
