@@ -47,9 +47,63 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime
+from typing import Callable, Optional
 
 from src.trading.polymarket_us.models import Market
+
+
+def _int_index(token: str) -> Optional[int]:
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _date_index(token: str) -> Optional[int]:
+    """Normalise a slug date to a sortable YYYYMMDD integer.
+
+    Both orderings occur live (`prdc-gtavi-12-31-2026` and
+    `ipcc-openai-2027-06-30`), and they are not ambiguous: a YYYY-MM-DD
+    string can't parse as MM-DD-YYYY (month 2026) and vice versa (month 31).
+    Ordering these wrong would invert the nesting direction and turn the
+    hedge into a doubled directional bet, so an unparseable date returns
+    None and the rung is dropped rather than guessed at.
+    """
+    for fmt in ("%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            return int(datetime.strptime(token, fmt).strftime("%Y%m%d"))
+        except ValueError:
+            continue
+    return None
+
+
+# Slug prefixes whose settlement text has been read and confirmed to be
+# cumulative "by <date>" (or "at any point before <date>") wording, so that
+# an earlier date genuinely implies a later one.
+#
+# Deliberately excluded: `aec` — 29 of the 36 date-suffixed families, and not
+# ladders at all. They are per-game winner markets ("Who will win St. Louis
+# vs Toronto"), where the trailing date is just the fixture date. Pairing two
+# of those would "arbitrage" two unrelated baseball games.
+#
+# Do not add a prefix here from its question title. `cpc` reads "When will
+# Bitcoin hit $150k?", which sounds like exclusive buckets, but its
+# description is "above $149,999.99 at any point before <date>" — cumulative.
+# The title misleads in both directions; only the description settles it.
+DATE_LADDER_PREFIXES = (
+    "aimc",   # "releases GPT-6 by <date>"
+    "apdc",   # "departure officially announced by <date>"
+    "cpc",    # "above $X at any point before <date>"
+    "ipcc",   # "confirms an IPO by <date>"
+    "lawec",  # "enacted into U.S. federal law by <date>"
+    "mowc",   # "formally initiates withdrawal by <date>"
+    "opdc",   # "resigns by <date>"
+    "pandc",  # "declares any disease a pandemic by <date>"
+    "pintc",  # "meets in person between issuance and <date>"
+    "prdc",   # "releases GTA VI by <date>"
+    "stsc",   # "for any day between <start> and <date>"
+)
 
 MIN_EDGE_CENTS = 1  # smallest guaranteed profit per contract worth acting on
 MAX_PLAUSIBLE_EDGE_CENTS = 20  # bigger than this is far more likely stale/bad data than real free money
@@ -77,13 +131,20 @@ class LadderFamily:
     """A set of markets whose outcomes nest, and which way the nesting runs.
 
     `subset_is_higher_index` says which rung implies the other: True when the
-    higher-numbered rung is the stricter event (gte3 implies gte2), False
-    when the lower-numbered one is (before-r2 implies before-r3).
+    higher-indexed rung is the stricter event (gte3 implies gte2), False when
+    the lower-indexed one is (before-r2 implies before-r3; released-by-March
+    implies released-by-June).
+
+    `prefix_allowlist`, when set, restricts the family to slugs whose first
+    hyphen segment is listed. Pattern shape alone is not evidence that a set
+    of markets nests — see DATE_LADDER_PREFIXES.
     """
 
     name: str
     regex: re.Pattern
     subset_is_higher_index: bool
+    index_parser: Callable[[str], Optional[int]] = _int_index
+    prefix_allowlist: Optional[tuple] = None
 
 
 LADDER_FAMILIES = (
@@ -93,6 +154,15 @@ LADDER_FAMILIES = (
     # `-before-r` and not `-r`, so it cannot pick up the `-rov-f1-rN`
     # win-in-round-N markets, which are mutually exclusive rather than nested.
     LadderFamily("before_round", re.compile(r"^(.*-before-r)(\d+)$"), subset_is_higher_index=False),
+    # "<thing> happens by <date>". An earlier deadline implies a later one,
+    # so the subset is the lower (earlier) index, same direction as rounds.
+    LadderFamily(
+        "by_date",
+        re.compile(r"^(.*?)-(\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4})$"),
+        subset_is_higher_index=False,
+        index_parser=_date_index,
+        prefix_allowlist=DATE_LADDER_PREFIXES,
+    ),
 )
 
 
@@ -126,11 +196,16 @@ def _group_ladders(markets: list[Market]) -> dict[tuple, list[tuple[int, Market]
             continue
         for family in LADDER_FAMILIES:
             match = family.regex.match(m.slug)
-            if match:
-                groups.setdefault((family.name, match.group(1)), []).append(
-                    (int(match.group(2)), m)
-                )
+            if not match:
+                continue
+            if family.prefix_allowlist is not None:
+                if m.slug.split("-", 1)[0] not in family.prefix_allowlist:
+                    break  # shape matches but this family isn't verified to nest
+            index = family.index_parser(match.group(2))
+            if index is None:
                 break
+            groups.setdefault((family.name, match.group(1)), []).append((index, m))
+            break
     return groups
 
 

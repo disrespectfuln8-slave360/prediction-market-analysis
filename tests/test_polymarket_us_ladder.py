@@ -108,6 +108,67 @@ def test_win_in_round_markets_are_never_traded_as_a_ladder():
     assert find_ladder_locks(markets, set(), budget_cents=500) == []
 
 
+def test_by_date_ladder_uses_earlier_date_as_the_subset():
+    """"Released by <date>": earlier deadline implies later one.
+
+    Live case at time of writing — GTA VI priced 89/90 for Nov 19 against
+    87/88 for Dec 31, i.e. the earlier date bid ABOVE the later date's ask.
+    """
+    markets = [
+        make_market("prdc-gtavi-11-19-2026", yes_bid=89, yes_ask=90),
+        make_market("prdc-gtavi-12-31-2026", yes_bid=87, yes_ask=88),
+    ]
+    locks = find_ladder_locks(markets, set(), budget_cents=500)
+    assert len(locks) == 1
+    lock = locks[0]
+    assert lock.family == "by_date"
+    assert lock.buy_slug == "prdc-gtavi-12-31-2026"   # YES on the later (implied) date
+    assert lock.sell_slug == "prdc-gtavi-11-19-2026"  # NO on the earlier (implier)
+    assert lock.edge_cents == 1
+
+
+def test_by_date_handles_both_slug_date_formats():
+    """MM-DD-YYYY and YYYY-MM-DD both occur and must sort together."""
+    markets = [
+        make_market("mowc-nato-us-11-19-2026", yes_bid=89, yes_ask=90),
+        make_market("mowc-nato-us-2026-12-31", yes_bid=87, yes_ask=88),
+    ]
+    locks = find_ladder_locks(markets, set(), budget_cents=500)
+    assert len(locks) == 1
+    assert locks[0].sell_slug == "mowc-nato-us-11-19-2026"  # earlier date is the subset
+
+
+def test_by_date_correct_ordering_is_not_traded():
+    markets = [
+        make_market("prdc-gtavi-11-19-2026", yes_bid=80, yes_ask=82),
+        make_market("prdc-gtavi-12-31-2026", yes_bid=88, yes_ask=90),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
+def test_game_winner_markets_are_never_traded_as_a_date_ladder():
+    """`aec-*` is 29 of 36 date-suffixed families and nests not at all.
+
+    The trailing date is the fixture date, so two rungs are two unrelated
+    baseball games. Shape matches the date pattern exactly; only the prefix
+    allowlist keeps them out.
+    """
+    markets = [
+        make_market("aec-mlb-stl-tor-2026-07-31", yes_bid=89, yes_ask=90),
+        make_market("aec-mlb-stl-tor-2026-08-01", yes_bid=40, yes_ask=42),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
+def test_unverified_date_prefix_is_ignored():
+    """A new date family must be read and allowlisted before it can trade."""
+    markets = [
+        make_market("newthing-x-2026-07-31", yes_bid=89, yes_ask=90),
+        make_market("newthing-x-2026-12-31", yes_bid=40, yes_ask=42),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
 def test_families_are_never_paired_with_each_other():
     """Two families under one prefix must not be cross-matched."""
     markets = [
