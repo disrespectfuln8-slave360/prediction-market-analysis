@@ -43,6 +43,8 @@ from src.trading.polymarket_us.strategy import (
     MIN_EDGE_CENTS,
     LadderLock,
     find_ladder_locks,
+    net_edge_cents,
+    required_net_edge_cents,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,6 +167,18 @@ class LadderArbBot:
             )
             return None
 
+        # Same fee + lock-up standard the scan applied, but against the
+        # fresh prices actually about to be traded.
+        net = net_edge_cents(m1.yes_ask, m2.yes_bid)
+        closes = [m.close_time for m in (m1, m2) if m.close_time]
+        required = required_net_edge_cents(max(closes) if closes else None)
+        if net < required:
+            logger.info(
+                "Net edge on %s too thin at re-quote (%+dc after fees, need %+dc) — skipping",
+                lock.buy_slug, net, required,
+            )
+            return None
+
         depths = [d for d in (m1.ask_depth, m2.bid_depth) if d is not None]
         if len(depths) < 2:
             max_contracts = UNKNOWN_DEPTH_CONTRACTS
@@ -271,10 +285,11 @@ class LadderArbBot:
         unhedged = yes_filled - max(0, no_filled)
         if unhedged <= 0:
             logger.info(
-                "LOCK: %dx YES %s@%dc + %dx NO %s@%dc  edge=+%dc/ct guaranteed  cost=$%.2f",
+                "LOCK: %dx YES %s@%dc + %dx NO %s@%dc  edge=+%dc/ct gross, ~%+dc/ct net of fees  cost=$%.2f",
                 yes_filled, lock.buy_slug, buy_price,
                 no_filled, lock.sell_slug, 100 - sell_price,
-                sell_price - buy_price, spent / 100,
+                sell_price - buy_price, net_edge_cents(buy_price, sell_price),
+                spent / 100,
             )
             self._consecutive_failures = 0
             return spent

@@ -15,13 +15,14 @@ from src.trading.polymarket_us.strategy import (
     MAX_SPREAD_CENTS,
     _size_lock,
     find_ladder_locks,
+    taker_fee_cents,
 )
 
 
-def make_market(slug, yes_bid, yes_ask, bid_depth=50, ask_depth=50):
+def make_market(slug, yes_bid, yes_ask, bid_depth=50, ask_depth=50, close_time=None):
     return Market(
         slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=True, closed=False, close_time=None,
+        active=True, closed=False, close_time=close_time,
         yes_bid=yes_bid, yes_ask=yes_ask,
         no_bid=(100 - yes_ask) if yes_ask is not None else None,
         no_ask=(100 - yes_bid) if yes_bid is not None else None,
@@ -110,14 +111,10 @@ def test_win_in_round_markets_are_never_traded_as_a_ladder():
 
 
 def test_by_date_ladder_uses_earlier_date_as_the_subset():
-    """"Released by <date>": earlier deadline implies later one.
-
-    Live case at time of writing — GTA VI priced 89/90 for Nov 19 against
-    87/88 for Dec 31, i.e. the earlier date bid ABOVE the later date's ask.
-    """
+    """"Released by <date>": earlier deadline implies later one."""
     markets = [
-        make_market("prdc-gtavi-11-19-2026", yes_bid=89, yes_ask=90),
-        make_market("prdc-gtavi-12-31-2026", yes_bid=87, yes_ask=88),
+        make_market("prdc-gtavi-11-19-2026", yes_bid=92, yes_ask=93),
+        make_market("prdc-gtavi-12-31-2026", yes_bid=85, yes_ask=86),
     ]
     locks = find_ladder_locks(markets, set(), budget_cents=500)
     assert len(locks) == 1
@@ -125,18 +122,82 @@ def test_by_date_ladder_uses_earlier_date_as_the_subset():
     assert lock.family == "by_date"
     assert lock.buy_slug == "prdc-gtavi-12-31-2026"   # YES on the later (implied) date
     assert lock.sell_slug == "prdc-gtavi-11-19-2026"  # NO on the earlier (implier)
-    assert lock.edge_cents == 1
+    assert lock.edge_cents == 6
 
 
 def test_by_date_handles_both_slug_date_formats():
     """MM-DD-YYYY and YYYY-MM-DD both occur and must sort together."""
     markets = [
-        make_market("mowc-nato-us-11-19-2026", yes_bid=89, yes_ask=90),
-        make_market("mowc-nato-us-2026-12-31", yes_bid=87, yes_ask=88),
+        make_market("mowc-nato-us-11-19-2026", yes_bid=92, yes_ask=93),
+        make_market("mowc-nato-us-2026-12-31", yes_bid=85, yes_ask=86),
     ]
     locks = find_ladder_locks(markets, set(), budget_cents=500)
     assert len(locks) == 1
     assert locks[0].sell_slug == "mowc-nato-us-11-19-2026"  # earlier date is the subset
+
+
+def test_fee_estimate_never_understates_observed_commissions():
+    """Every (price, count, commission) point is a real fill from this
+    account's /v1/portfolio/activities on 2026-08-01. The estimate may
+    overstate (a floor that is too strict skips a marginal trade) but must
+    never understate (a floor that is too loose books losers as winners).
+    """
+    observed = [
+        (17, 1, 1), (20, 1, 1), (18, 2, 2), (88, 2, 1), (87, 2, 1),
+        (11, 1, 1), (4, 2, 0), (3, 2, 0), (17, 2, 2),
+    ]
+    for price, count, commission in observed:
+        assert taker_fee_cents(price, count) >= commission
+
+
+def test_one_cent_gross_edge_is_rejected_as_fee_negative():
+    """The live GTA VI lock: 88c ask vs 89c bid, +1c gross. Entry fees are
+    ~2c/contract, so the "guaranteed profit" is a guaranteed loss. The old
+    code took this trade with real money.
+    """
+    markets = [
+        make_market("prdc-gtavi-11-19-2026", yes_bid=89, yes_ask=90),
+        make_market("prdc-gtavi-12-31-2026", yes_bid=87, yes_ask=88),
+    ]
+    assert find_ladder_locks(markets, set(), budget_cents=500) == []
+
+
+def test_long_dated_lock_needs_more_edge_than_same_day():
+    """+6c gross (~+4c net) clears the fee floor same-day but not four
+    months out, where the lock-up hurdle demands more.
+    """
+    from datetime import datetime, timedelta, timezone
+    far = datetime.now(timezone.utc) + timedelta(days=120)
+    near = datetime.now(timezone.utc) + timedelta(hours=6)
+
+    def ladder(close):
+        return [
+            make_market("prdc-gtavi-11-19-2026", yes_bid=92, yes_ask=93, close_time=close),
+            make_market("prdc-gtavi-12-31-2026", yes_bid=85, yes_ask=86, close_time=close),
+        ]
+
+    assert len(find_ladder_locks(ladder(near), set(), budget_cents=500)) == 1
+    assert find_ladder_locks(ladder(far), set(), budget_cents=500) == []
+
+
+def test_paper_ledger_charges_fees(tmp_path):
+    """A fee-free paper ledger overstated every thin-edge lock — the +$38
+    paper record was earned with simulated free trading.
+    """
+    from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
+    class _StubReal:
+        def close(self):
+            pass
+
+    client = PaperPolymarketUSTradingClient(
+        real_client=_StubReal(), ledger_path=tmp_path / "ledger.json",
+        starting_balance_cents=10_000,
+    )
+    client.place_order(market_slug="m", side="yes", count=5, yes_price=40)
+    fee = taker_fee_cents(40, 5)
+    assert fee > 0
+    assert client.get_balance() == 10_000 - 5 * 40 - fee
 
 
 def test_by_date_correct_ordering_is_not_traded():

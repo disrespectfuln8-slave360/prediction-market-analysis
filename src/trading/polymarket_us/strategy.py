@@ -45,12 +45,32 @@ therefore an explicit allowlist of verified patterns, never a general
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from src.trading.polymarket_us.models import Market
+
+
+def taker_fee_cents(price_cents: int, count: int) -> int:
+    """Estimated commission for taking `count` contracts at `price_cents`.
+
+    Calibrated against 20 real fills from this account (2026-08-01,
+    /v1/portfolio/activities): commissions track the standard prediction-
+    market schedule fee = 7% * p * (1-p) per contract — ~1c at mid prices,
+    ~0 at the extremes, 1.86% of notional across the sample. The exchange's
+    exact rounding wasn't reverse-engineerable from the sample, so this
+    rounds UP at the order level: it matched or overestimated (by at most
+    1c) every observed fill and never underestimated. For a fee floor,
+    overestimating rejects a marginal trade; underestimating books losers
+    as winners — only one direction is safe.
+
+    Settlement fees are assumed zero (Kalshi-style). Not yet verifiable:
+    no real position on this account has settled.
+    """
+    return math.ceil(0.07 * price_cents * (100 - price_cents) * count / 100.0)
 
 
 def _int_index(token: str) -> Optional[int]:
@@ -105,8 +125,47 @@ DATE_LADDER_PREFIXES = (
     "stsc",   # "for any day between <start> and <date>"
 )
 
-MIN_EDGE_CENTS = 1  # smallest guaranteed profit per contract worth acting on
+MIN_EDGE_CENTS = 1  # smallest gross edge per contract worth even evaluating
 MAX_PLAUSIBLE_EDGE_CENTS = 20  # bigger than this is far more likely stale/bad data than real free money
+
+# Smallest profit per contract AFTER estimated fees. The live GTA VI lock
+# (2026-07-31) cost 99c/contract and pays $1.00 at settlement: +1c gross,
+# which entry commissions of ~1-2c turn into breakeven-or-worse. "Guaranteed"
+# arithmetic that ignores fees books losers as winners.
+MIN_NET_PROFIT_CENTS = 1
+
+# Extra net edge demanded per 30 days the capital stays locked, per contract.
+# A lock costs up to ~$1/contract and pays out only at settlement, so 2c per
+# 30 days is roughly a 24%/yr hurdle rate. Same-day sports ladders pass on
+# 1c net; a 1c-net lock settling four months out (the GTA VI trade: ~3%/yr,
+# worse than a treasury bill) is correctly rejected.
+LOCKUP_CENTS_PER_30_DAYS = 2
+
+
+def net_edge_cents(buy_price: int, sell_price: int) -> int:
+    """Per-contract profit after estimated entry fees on both legs.
+
+    The NO leg is bought at (100 - sell_price), and fees apply to what each
+    leg actually costs. Per-contract ceil overestimates slightly on
+    multi-contract orders, which is the safe direction for a floor.
+    """
+    gross = sell_price - buy_price
+    fees = taker_fee_cents(buy_price, 1) + taker_fee_cents(100 - sell_price, 1)
+    return gross - fees
+
+
+def required_net_edge_cents(close_time: Optional[datetime], now: Optional[datetime] = None) -> int:
+    """Minimum acceptable net edge per contract for a lock settling at `close_time`.
+
+    A missing close_time is treated as imminent (sports markets settle same
+    day); the fee floor still applies, only the lock-up premium is waived.
+    """
+    if close_time is None:
+        return MIN_NET_PROFIT_CENTS
+    now = now or datetime.now(timezone.utc)
+    ct = close_time if close_time.tzinfo else close_time.replace(tzinfo=timezone.utc)
+    days = max(0.0, (ct - now).total_seconds() / 86400.0)
+    return MIN_NET_PROFIT_CENTS + int(days) * LOCKUP_CENTS_PER_30_DAYS // 30
 DEFAULT_LOCK_BUDGET_CENTS = 500  # $5, matching the flat bet-size convention used across this repo
 MAX_CONTRACTS = 10  # cap size regardless of budget — book depth isn't visible from the bulk markets scan
 
@@ -242,11 +301,12 @@ def find_ladder_locks(
     held = held or set()
     locks: list[LadderLock] = []
     by_name = {f.name: f for f in LADDER_FAMILIES}
+    now = datetime.now(timezone.utc)
 
     for (family_name, _prefix), rungs in _group_ladders(markets).items():
         family = by_name[family_name]
         rungs.sort(key=lambda t: t[0])
-        best: Optional[tuple[int, Market, Market]] = None  # (edge, superset, subset)
+        best: Optional[tuple[int, Market, Market]] = None  # (net_edge, superset, subset)
 
         for i in range(len(rungs)):
             for j in range(i + 1, len(rungs)):
@@ -263,12 +323,19 @@ def find_ladder_locks(
                 edge = subset.yes_bid - superset.yes_ask
                 if edge < MIN_EDGE_CENTS or edge > MAX_PLAUSIBLE_EDGE_CENTS:
                     continue
-                if best is None or edge > best[0]:
-                    best = (edge, superset, subset)
+                # Fees first, then the lock-up hurdle: capital is tied until
+                # the LATER of the two legs settles.
+                net = net_edge_cents(superset.yes_ask, subset.yes_bid)
+                closes = [m.close_time for m in (subset, superset) if m.close_time]
+                if net < required_net_edge_cents(max(closes) if closes else None, now):
+                    continue
+                if best is None or net > best[0]:
+                    best = (net, superset, subset)
 
         if best is None:
             continue
-        edge, superset, subset = best
+        _net, superset, subset = best
+        edge = subset.yes_bid - superset.yes_ask  # gross, for logging/limits
         count = _size_lock(superset.yes_ask, subset.yes_bid, budget_cents)
         if count <= 0:
             continue

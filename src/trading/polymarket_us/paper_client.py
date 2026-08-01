@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.trading.polymarket_us.models import Market, Order, Position, _amount_to_cents
+from src.trading.polymarket_us.strategy import taker_fee_cents
 from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
 
 logger = logging.getLogger(__name__)
@@ -167,7 +168,11 @@ class PaperPolymarketUSTradingClient:
         # been caught in paper mode.
         price_paid = yes_price if side == "yes" else (100 - yes_price)
         price_paid = max(1, min(99, price_paid))
-        cost = price_paid * count
+        # Real fills pay commission (~7% * p * (1-p) per contract, measured on
+        # this account). A fee-free paper ledger books every thin-edge lock as
+        # a winner that live trading would turn into a loser.
+        fee = taker_fee_cents(price_paid, count)
+        cost = price_paid * count + fee
 
         with self._lock:
             if cost > self._cash_cents:
@@ -203,7 +208,7 @@ class PaperPolymarketUSTradingClient:
             leg["yes"] = held - sold
             if leg.get("yes", 0) == 0 and leg.get("no", 0) == 0:
                 self._positions.pop(market_slug, None)
-            proceeds = sold * price_cents
+            proceeds = sold * price_cents - taker_fee_cents(price_cents, sold)
             self._cash_cents += proceeds
             order_id = f"paper-{uuid.uuid4().hex[:12]}"
             self._trade_log.append({
