@@ -59,6 +59,24 @@ BALANCE_SAFETY_FRACTION = 0.95
 FILL_POLL_ATTEMPTS = 5
 FILL_POLL_DELAY = 1.0
 
+# After a lock fails to hedge, stop retrying that pair for a while. Flattening
+# an unhedged leg costs the spread, so a pair that fails repeatedly is not a
+# missed opportunity, it is a recurring bill. Live on 2026-07-31 the same
+# three pairs were re-attempted every scan for 35 minutes and burned 79% of
+# the account without ever completing a lock.
+FAILED_PAIR_COOLDOWN_SECS = 3600.0
+
+# Consecutive failed hedges before the bot stops trading altogether. Cooldowns
+# handle one bad pair; this catches the case where conditions are broadly
+# wrong (an API degradation, a systemic mispricing of the short side) and
+# every pair is failing.
+MAX_CONSECUTIVE_HEDGE_FAILURES = 3
+
+# Contracts to risk when the book depth is unknown. get_market() supplies
+# depth from /bbo, so this only applies if that field ever goes missing —
+# in which case one contract is the most that can be lost to a failed hedge.
+UNKNOWN_DEPTH_CONTRACTS = 1
+
 
 class LadderArbBot:
     """Scans polymarket.us for ladder-monotonicity violations and places
@@ -78,10 +96,14 @@ class LadderArbBot:
         self.poll_interval = poll_interval
         self.max_open_legs = max_open_legs
         self.max_lock_budget_cents = max_lock_budget_cents
-        # Set when an unhedged remainder could not be flattened. Placing more
-        # locks while carrying unknown directional risk compounds the problem,
-        # so the bot keeps scanning and reporting but stops trading.
+        # Set when an unhedged remainder could not be flattened, or when too
+        # many hedges fail in a row. Placing more locks while carrying unknown
+        # directional risk compounds the problem, so the bot keeps scanning
+        # and reporting but stops trading.
         self._halted_reason: Optional[str] = None
+        # (buy_slug, sell_slug) -> monotonic time the pair may be retried.
+        self._cooldown: dict[tuple, float] = {}
+        self._consecutive_failures = 0
 
     def _held_slugs(self, positions, open_orders) -> set:
         return {p.market_slug for p in positions} | {o.market_slug for o in open_orders}
@@ -110,12 +132,18 @@ class LadderArbBot:
 
     # ── Fresh quotes ─────────────────────────────────────────────────────────
 
-    def _requote(self, lock: LadderLock) -> Optional[tuple[int, int]]:
+    def _requote(self, lock: LadderLock) -> Optional[tuple[int, int, int]]:
         """Re-price both legs against a fresh per-market BBO.
 
-        Returns (buy_price, sell_price) if the edge still holds, else None.
-        get_market() fetches the market's own BBO endpoint, which is fresher
-        than the bulk scan snapshot the candidate was built from.
+        Returns (buy_price, sell_price, max_contracts) if the edge still
+        holds, else None. get_market() fetches the market's own BBO endpoint,
+        which is both fresher than the bulk scan snapshot and the only source
+        of book depth.
+
+        max_contracts is what the two books can actually absorb. Buying YES
+        lifts the superset's ask side; buying NO is economically selling YES,
+        so it hits the subset's bid side. Sizing past either is what turns a
+        lock into a half-filled position that has to be unwound at a loss.
         """
         try:
             m1 = self.client.get_market(lock.buy_slug)
@@ -136,7 +164,19 @@ class LadderArbBot:
                 lock.buy_slug, lock.edge_cents, edge,
             )
             return None
-        return m1.yes_ask, m2.yes_bid
+
+        depths = [d for d in (m1.ask_depth, m2.bid_depth) if d is not None]
+        if len(depths) < 2:
+            max_contracts = UNKNOWN_DEPTH_CONTRACTS
+            logger.debug("Depth unavailable for %s — capping at %d contract(s)",
+                         lock.buy_slug, max_contracts)
+        else:
+            max_contracts = min(depths)
+        if max_contracts <= 0:
+            logger.info("No book depth on %s / %s — skipping",
+                        lock.buy_slug, lock.sell_slug)
+            return None
+        return m1.yes_ask, m2.yes_bid, max_contracts
 
     # ── Flattening ───────────────────────────────────────────────────────────
 
@@ -174,12 +214,13 @@ class LadderArbBot:
         quotes = self._requote(lock)
         if quotes is None:
             return 0
-        buy_price, sell_price = quotes
+        buy_price, sell_price, max_contracts = quotes
 
         cost_per_contract = buy_price + (100 - sell_price)
-        count = min(budget_cents // cost_per_contract, lock.count)
+        count = min(budget_cents // cost_per_contract, lock.count, max_contracts)
         if count <= 0:
-            logger.debug("Re-quoted %s no longer fits the budget — skipping", lock.buy_slug)
+            logger.debug("Re-quoted %s no longer fits the budget/book — skipping",
+                         lock.buy_slug)
             return 0
 
         before_buy = self._net_position(lock.buy_slug)
@@ -235,12 +276,16 @@ class LadderArbBot:
                 no_filled, lock.sell_slug, 100 - sell_price,
                 sell_price - buy_price, spent / 100,
             )
+            self._consecutive_failures = 0
             return spent
 
         logger.error(
             "NO leg on %s covered %d of %d — flattening %dx unhedged long on %s",
             lock.sell_slug, max(0, no_filled), yes_filled, unhedged, lock.buy_slug,
         )
+        # Unwinding costs the spread whether or not it succeeds, so this pair
+        # has to stop being retried either way.
+        self._mark_failed(lock)
         if self._flatten_long(lock.buy_slug, unhedged):
             spent -= unhedged * buy_price  # recovered, roughly — exact P&L is in the balance
         else:
@@ -248,6 +293,27 @@ class LadderArbBot:
                 f"unhedged {unhedged}x long on {lock.buy_slug} could not be flattened"
             )
         return max(0, spent)
+
+    def _mark_failed(self, lock: LadderLock) -> None:
+        """Cool a pair off, and halt if hedging keeps failing across pairs."""
+        self._cooldown[(lock.buy_slug, lock.sell_slug)] = (
+            time.monotonic() + FAILED_PAIR_COOLDOWN_SECS
+        )
+        self._consecutive_failures += 1
+        logger.info(
+            "Cooling off %s / %s for %.0f min (%d consecutive hedge failures)",
+            lock.buy_slug, lock.sell_slug, FAILED_PAIR_COOLDOWN_SECS / 60,
+            self._consecutive_failures,
+        )
+        if self._consecutive_failures >= MAX_CONSECUTIVE_HEDGE_FAILURES:
+            self._halt(
+                f"{self._consecutive_failures} consecutive hedge failures — the "
+                "short side is not filling at the quoted price"
+            )
+
+    def _in_cooldown(self, lock: LadderLock) -> bool:
+        until = self._cooldown.get((lock.buy_slug, lock.sell_slug))
+        return until is not None and time.monotonic() < until
 
     def _halt(self, reason: str) -> None:
         self._halted_reason = reason
@@ -298,6 +364,10 @@ class LadderArbBot:
         # first one already committed.
         remaining = budget
         for lock in locks[:slots]:
+            if self._in_cooldown(lock):
+                logger.debug("Skipping %s / %s — cooling off after a failed hedge",
+                             lock.buy_slug, lock.sell_slug)
+                continue
             if lock.total_cost_cents > remaining:
                 logger.debug(
                     "Skipping lock on %s — cost $%.2f exceeds remaining budget $%.2f",

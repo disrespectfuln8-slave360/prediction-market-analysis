@@ -18,7 +18,7 @@ from src.trading.polymarket_us.strategy import (
 )
 
 
-def make_market(slug, yes_bid, yes_ask):
+def make_market(slug, yes_bid, yes_ask, bid_depth=50, ask_depth=50):
     return Market(
         slug=slug, id=slug, title=slug, category="sports", tags=[],
         active=True, closed=False, close_time=None,
@@ -26,6 +26,7 @@ def make_market(slug, yes_bid, yes_ask):
         no_bid=(100 - yes_ask) if yes_ask is not None else None,
         no_ask=(100 - yes_bid) if yes_bid is not None else None,
         volume=0.0, volume_24h=0.0,
+        bid_depth=bid_depth, ask_depth=ask_depth,
     )
 
 
@@ -325,6 +326,79 @@ def test_failed_flatten_halts_trading():
     before = len(client.orders)
     bot._scan_once()
     assert len(client.orders) == before
+
+
+def test_failed_pair_is_not_retried_next_scan():
+    """The 2026-07-31 loss: same pair re-attempted every scan for 35 minutes.
+
+    Each cycle filled the YES leg, failed the hedge, and paid the spread to
+    unwind — about twenty times, for 79% of the account. One attempt is a
+    cost of doing business; twenty is a bug.
+    """
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 0}, report_status="unknown")
+    bot = make_bot(client)
+    locks = find_ladder_locks(LADDER, set(), budget_cents=500)
+
+    bot._place_lock(locks[0], budget_cents=500)
+    assert client.sells, "first attempt should have unwound"
+    assert bot._in_cooldown(locks[0])
+
+    orders_before = len(client.orders)
+    bot._scan_once()
+    assert len(client.orders) == orders_before, "pair must not be retried while cooling off"
+
+
+def test_repeated_hedge_failures_halt_the_bot():
+    """Three strikes across pairs means conditions are broadly wrong."""
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 0}, report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(LADDER, set(), budget_cents=500)[0]
+
+    for _ in range(3):
+        bot._cooldown.clear()  # simulate three *different* pairs failing
+        bot._place_lock(lock, budget_cents=500)
+
+    assert bot._consecutive_failures >= 3
+    assert bot._halted_reason is not None
+
+
+def test_successful_lock_resets_the_failure_counter():
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 5}, report_status="unknown")
+    bot = make_bot(client)
+    bot._consecutive_failures = 2
+    lock = find_ladder_locks(LADDER, set(), budget_cents=500)[0]
+    bot._place_lock(lock, budget_cents=500)
+    assert bot._consecutive_failures == 0
+    assert bot._halted_reason is None
+
+
+def test_order_is_capped_to_book_depth():
+    """4 contracts against a 3-deep book is what caused the unwind loop."""
+    shallow = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40, ask_depth=3, bid_depth=50),
+        make_market("p-gte2", yes_bid=50, yes_ask=52, bid_depth=3, ask_depth=50),
+    ]
+    client = FakeClient(shallow, fills={"p-gte1": 99, "p-gte2": 99}, report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(shallow, set(), budget_cents=500)[0]
+    assert lock.count > 3, "budget alone would have sized past the book"
+
+    bot._place_lock(lock, budget_cents=500)
+    for order in client.orders:
+        slug, count = order[0], order[2]
+        assert count <= 3, f"{slug} ordered {count} against a 3-deep book"
+
+
+def test_unknown_depth_falls_back_to_one_contract():
+    blind = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40, ask_depth=None, bid_depth=None),
+        make_market("p-gte2", yes_bid=50, yes_ask=52, ask_depth=None, bid_depth=None),
+    ]
+    client = FakeClient(blind, fills={"p-gte1": 99, "p-gte2": 99}, report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(blind, set(), budget_cents=500)[0]
+    bot._place_lock(lock, budget_cents=500)
+    assert all(o[2] == 1 for o in client.orders)
 
 
 def test_stale_edge_is_rejected_at_requote():

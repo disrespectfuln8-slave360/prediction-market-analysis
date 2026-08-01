@@ -28,15 +28,33 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# The process writes its own log rather than relying on a shell redirect.
+# The scheduled task used to run this through `cmd.exe /c ... >> run_polyus.log`,
+# and stopping that task reaped only the cmd.exe wrapper — the python
+# grandchild survived, kept the single-instance lock, and left Task Scheduler
+# reporting "Ready" while the bot was still trading. Owning the log here means
+# the task can invoke python directly, so stopping the task stops the bot.
+_LOG_DIR = Path(__file__).resolve().parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Rotating, because this runs unattended for days at a time and an unbounded
+# log is a slow-motion disk problem (run_all.log reached 15 MB).
+_file_handler = RotatingFileHandler(
+    _LOG_DIR / "run_polyus.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  [%(name)-20s]  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[_file_handler, logging.StreamHandler()],
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)

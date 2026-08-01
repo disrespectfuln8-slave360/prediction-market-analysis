@@ -58,6 +58,33 @@ def _best_quotes(data: dict, bbo: Optional[dict]):
     return _amount_to_cents(data.get("bestBidQuote")), _amount_to_cents(data.get("bestAskQuote"))
 
 
+def _best_depths(bbo: Optional[dict]):
+    """Return (bid_depth, ask_depth), or (None, None) when unknown.
+
+    Only the /bbo endpoint carries these — the bulk /v1/markets records have
+    no depth field at all, which is why a bulk-scan candidate can never be
+    sized safely on its own.
+
+    The unit is not documented (the official SDK types say only `int`) and
+    could be contracts, resting orders, or price levels. Callers should read
+    it as a contract count, because that is the conservative reading: if it
+    actually means orders or levels the order is merely smaller than it
+    needed to be, whereas the opposite error oversizes past the book. That
+    oversizing is what drained the live account on 2026-07-31 — 4-contract
+    orders against 3-deep books filled the first leg, failed the hedge, and
+    paid the spread to unwind, roughly twenty times over.
+    """
+    if not bbo:
+        return None, None
+    md = bbo.get("marketData", bbo)
+    def _as_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    return _as_int(md.get("bidDepth")), _as_int(md.get("askDepth"))
+
+
 @dataclass
 class Market:
     slug: str
@@ -74,12 +101,15 @@ class Market:
     no_ask: Optional[int]
     volume: float
     volume_24h: float
+    bid_depth: Optional[int] = None  # only present when built with a /bbo record
+    ask_depth: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: dict, bbo: Optional[dict] = None) -> "Market":
         """Build from a market record (list or single-slug fetch), optionally
         refined with a separately-fetched MarketBBO record."""
         yes_bid, yes_ask = _best_quotes(data, bbo)
+        bid_depth, ask_depth = _best_depths(bbo)
         no_bid = (100 - yes_ask) if yes_ask is not None else None
         no_ask = (100 - yes_bid) if yes_bid is not None else None
         return cls(
@@ -97,6 +127,8 @@ class Market:
             no_ask=no_ask,
             volume=float(data.get("volume", 0) or 0),
             volume_24h=float(data.get("volume24hr", 0) or 0),
+            bid_depth=bid_depth,
+            ask_depth=ask_depth,
         )
 
 
