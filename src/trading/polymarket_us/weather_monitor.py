@@ -42,7 +42,7 @@ import logging
 import math
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -123,7 +123,7 @@ class WeatherMonitor:
             today = self._local_today(city)
             found = []
             for m in markets:
-                if not m.slug.startswith("tc-temp-%s-%s-" % (city, today)):
+                if not m.slug.startswith(f"tc-temp-{city}-{today}-"):
                     continue
                 bounds = parse_bucket_bounds(m.title or "")
                 if bounds is None:
@@ -144,7 +144,7 @@ class WeatherMonitor:
         midnight = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
         try:
             r = self._nws.get(
-                "/stations/%s/observations" % station,
+                f"/stations/{station}/observations",
                 params={"start": midnight.astimezone(timezone.utc).isoformat(), "limit": 500},
             )
             r.raise_for_status()
@@ -185,8 +185,8 @@ class WeatherMonitor:
                     logger.debug("BBO failed for %s: %s", slug, exc)
                     continue
 
-                def cents(key):
-                    v = (md.get(key) or {}).get("value")
+                def cents(key, data=md):
+                    v = (data.get(key) or {}).get("value")
                     return None if v is None else round(float(v) * 100)
 
                 bid, ask = cents("bestBid"), cents("bestAsk")
@@ -212,8 +212,9 @@ class WeatherMonitor:
                         "net_cents_per_ct": net,
                     }
                     self._write_row(row)
-                    dead_line.append("%s bid=%dc depth=%s net=%+dc" % (
-                        slug.rsplit("-", 1)[-1], bid, md.get("bidDepth"), net))
+                    bucket = slug.rsplit("-", 1)[-1]
+                    dead_line.append(
+                        f"{bucket} bid={bid}c depth={md.get('bidDepth')} net={net:+d}c")
 
             if dead_line:
                 logger.info("[%s] obs_max=%.1fF  DEAD-BID: %s", city, max_f, "  ".join(dead_line))
