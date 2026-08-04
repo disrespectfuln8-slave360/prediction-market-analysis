@@ -45,32 +45,44 @@ therefore an explicit allowlist of verified patterns, never a general
 """
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Callable, Optional
 
 from src.trading.polymarket_us.models import Market
 
+# Verified against docs.polymarket.us/fees.md (2026-08-03), effective
+# exchange-wide from 2026-07-01: fee = theta * count * p * (1-p), rounded to
+# the nearest cent with banker's rounding (ties to even). theta_taker=0.06
+# reproduces all 9 real fills from this account (/v1/portfolio/activities,
+# 2026-08-01) exactly — see test_fee_estimate_never_understates_observed_commissions.
+# The prior 0.07/ceil formula was a pre-verification safety pad, not measured
+# truth. Multi-fill sweeps (one aggressive order crossing several resting
+# prices) aren't modeled here — every caller today prices a leg as a single
+# fill at a single price.
+THETA_TAKER = Decimal("0.06")
+THETA_MAKER = Decimal("-0.0125")
+
+
+def _fee_cents_exact(theta: Decimal, price_cents: int, count: int) -> Decimal:
+    p = Decimal(price_cents)
+    return theta * p * (100 - p) * count / 100
+
 
 def taker_fee_cents(price_cents: int, count: int) -> int:
-    """Estimated commission for taking `count` contracts at `price_cents`.
+    """Commission charged to the aggressor for taking `count` contracts at
+    `price_cents`. See THETA_TAKER above for the source and rounding rule."""
+    exact = _fee_cents_exact(THETA_TAKER, price_cents, count)
+    return int(exact.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
-    Calibrated against 20 real fills from this account (2026-08-01,
-    /v1/portfolio/activities): commissions track the standard prediction-
-    market schedule fee = 7% * p * (1-p) per contract — ~1c at mid prices,
-    ~0 at the extremes, 1.86% of notional across the sample. The exchange's
-    exact rounding wasn't reverse-engineerable from the sample, so this
-    rounds UP at the order level: it matched or overestimated (by at most
-    1c) every observed fill and never underestimated. For a fee floor,
-    overestimating rejects a marginal trade; underestimating books losers
-    as winners — only one direction is safe.
 
-    Settlement fees are assumed zero (Kalshi-style). Not yet verifiable:
-    no real position on this account has settled.
-    """
-    return math.ceil(0.07 * price_cents * (100 - price_cents) * count / 100.0)
+def maker_rebate_cents(price_cents: int, count: int) -> int:
+    """Rebate credited to the resting side when `count` contracts fill at
+    `price_cents`. Positive = credit. See THETA_MAKER above."""
+    exact = -_fee_cents_exact(THETA_MAKER, price_cents, count)
+    return int(exact.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
 
 def _int_index(token: str) -> Optional[int]:
