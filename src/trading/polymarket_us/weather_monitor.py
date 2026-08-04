@@ -18,6 +18,7 @@ text on 2026-08-02 (all settle on the NWS Climatological Report (Daily)):
     miahigh -> Miami Intl         KMIA
     mdwhigh -> Chicago Midway     KMDW
     laxhigh -> Los Angeles Intl   KLAX
+    sfohigh -> SF Intl            KSFO
 
 Bucket bounds are parsed from market TITLES ("79 or below", "80 to 81",
 "88 or above" — bounds inclusive), never from slugs: slug semantics are
@@ -59,6 +60,7 @@ CITY_STATIONS = {
     "miahigh": ("KMIA", "America/New_York"),
     "mdwhigh": ("KMDW", "America/Chicago"),
     "laxhigh": ("KLAX", "America/Los_Angeles"),
+    "sfohigh": ("KSFO", "America/Los_Angeles"),
 }
 
 NWS_BASE = "https://api.weather.gov"
