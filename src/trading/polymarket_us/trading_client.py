@@ -180,7 +180,7 @@ class PolymarketUSTradingClient:
         self,
         market_slug: str,
         side: str,
-        count: int,
+        count: float,
         yes_price: int,
         immediate_or_cancel: bool = False,
     ) -> Order:
@@ -247,7 +247,7 @@ class PolymarketUSTradingClient:
             status=status,
         )
 
-    def close_long(self, market_slug: str, count: int, price_cents: int) -> tuple[str, int]:
+    def close_long(self, market_slug: str, count: float, price_cents: int) -> tuple[str, int]:
         """Sell an existing long position. Returns (order_id, contracts_sold).
 
         Immediate-or-cancel, not good-till-cancel, and that choice is the whole

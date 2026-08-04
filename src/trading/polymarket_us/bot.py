@@ -29,6 +29,16 @@ So the rules here are:
      scan are being sent against quotes that have already moved.
   5. If an unhedged remainder cannot be flattened, stop trading and say so.
      Carrying naked directional risk is worse than placing no trades.
+
+Rule 1 had a second blind spot found live on 2026-08-03: get_positions()
+told the truth, but this file threw part of it away. Some markets fill in
+fractional contracts (minimumTradeQty 0.01 on player-prop markets), and a
+5-contract IOC buy partial-filled at 0.3 within the same second. The
+position readback caught the 0.3 correctly — but the fill-size calculation
+below wrapped it in int(), truncating 0.3 to 0, logging "did not fill", and
+walking away from a real, unhedged, now-untracked 0.3-contract position.
+It lost its full stake at settlement a few hours later. Fill sizes here are
+floats end to end for exactly this reason; do not cast one to int.
 """
 from __future__ import annotations
 
@@ -78,6 +88,16 @@ MAX_CONSECUTIVE_HEDGE_FAILURES = 3
 # depth from /bbo, so this only applies if that field ever goes missing —
 # in which case one contract is the most that can be lost to a failed hedge.
 UNKNOWN_DEPTH_CONTRACTS = 1
+
+# Position readback moves in fractional contracts (see module docstring).
+# Anything at or below this is "didn't move" noise, not a real fill.
+FILL_EPSILON = 1e-6
+
+
+def _fmt_qty(x: float) -> str:
+    """Compact display for a fractional contract count: "2" not "2.0",
+    "0.3" not "0.30000000000000004"."""
+    return f"{x:g}"
 
 
 class LadderArbBot:
@@ -194,7 +214,7 @@ class LadderArbBot:
 
     # ── Flattening ───────────────────────────────────────────────────────────
 
-    def _flatten_long(self, slug: str, count: int) -> bool:
+    def _flatten_long(self, slug: str, count: float) -> bool:
         """Sell `count` contracts of an unhedged long. True if it's gone."""
         try:
             market = self.client.get_market(slug)
@@ -212,7 +232,7 @@ class LadderArbBot:
         # reported zero fills while fully filling.
         remaining = self._position_after_order(slug, float(count))
         if abs(remaining) < 1e-9:
-            logger.info("Flattened %dx %s", count, slug)
+            logger.info("Flattened %sx %s", _fmt_qty(count), slug)
             return True
         logger.error("Flatten of %s incomplete — %s still held", slug, remaining)
         return False
@@ -258,13 +278,16 @@ class LadderArbBot:
                 return int(stray) * buy_price
             return 0
 
-        yes_filled = int(self._position_after_order(lock.buy_slug, before_buy) - before_buy)
-        if yes_filled <= 0:
+        # A float, deliberately never int()'d — this exchange fills some
+        # markets in fractional contracts, and truncating a real 0.3-contract
+        # fill to 0 is exactly the bug the module docstring describes.
+        yes_filled = self._position_after_order(lock.buy_slug, before_buy) - before_buy
+        if yes_filled <= FILL_EPSILON:
             logger.info("YES leg on %s did not fill (IOC) — no position taken", lock.buy_slug)
             return 0
         if yes_filled < count:
-            logger.info("YES leg on %s partially filled %d/%d — hedging the real fill",
-                        lock.buy_slug, yes_filled, count)
+            logger.info("YES leg on %s partially filled %s/%d — hedging the real fill",
+                        lock.buy_slug, _fmt_qty(yes_filled), count)
 
         spent = yes_filled * buy_price
 
@@ -279,15 +302,15 @@ class LadderArbBot:
 
         # Buying NO is a short, so the net position moves negative.
         after_sell = self._position_after_order(lock.sell_slug, before_sell)
-        no_filled = int(before_sell - after_sell)
-        spent += max(0, no_filled) * (100 - sell_price)
+        no_filled = before_sell - after_sell
+        spent += max(0.0, no_filled) * (100 - sell_price)
 
-        unhedged = yes_filled - max(0, no_filled)
-        if unhedged <= 0:
+        unhedged = yes_filled - max(0.0, no_filled)
+        if unhedged <= FILL_EPSILON:
             logger.info(
-                "LOCK: %dx YES %s@%dc + %dx NO %s@%dc  edge=+%dc/ct gross, ~%+dc/ct net of fees  cost=$%.2f",
-                yes_filled, lock.buy_slug, buy_price,
-                no_filled, lock.sell_slug, 100 - sell_price,
+                "LOCK: %sx YES %s@%dc + %sx NO %s@%dc  edge=+%dc/ct gross, ~%+dc/ct net of fees  cost=$%.2f",
+                _fmt_qty(yes_filled), lock.buy_slug, buy_price,
+                _fmt_qty(no_filled), lock.sell_slug, 100 - sell_price,
                 sell_price - buy_price, net_edge_cents(buy_price, sell_price),
                 spent / 100,
             )
@@ -295,8 +318,9 @@ class LadderArbBot:
             return spent
 
         logger.error(
-            "NO leg on %s covered %d of %d — flattening %dx unhedged long on %s",
-            lock.sell_slug, max(0, no_filled), yes_filled, unhedged, lock.buy_slug,
+            "NO leg on %s covered %s of %s — flattening %sx unhedged long on %s",
+            lock.sell_slug, _fmt_qty(max(0.0, no_filled)), _fmt_qty(yes_filled),
+            _fmt_qty(unhedged), lock.buy_slug,
         )
         # Unwinding costs the spread whether or not it succeeds, so this pair
         # has to stop being retried either way.
@@ -305,7 +329,7 @@ class LadderArbBot:
             spent -= unhedged * buy_price  # recovered, roughly — exact P&L is in the balance
         else:
             self._halt(
-                f"unhedged {unhedged}x long on {lock.buy_slug} could not be flattened"
+                f"unhedged {_fmt_qty(unhedged)}x long on {lock.buy_slug} could not be flattened"
             )
         return max(0, spent)
 

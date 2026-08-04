@@ -361,6 +361,25 @@ def test_partial_first_leg_is_hedged_at_its_real_size():
     assert bot._halted_reason is None
 
 
+def test_fractional_fill_is_hedged_not_ignored():
+    """The incident: a 5-contract IOC buy on a player-prop market (0.01
+    minimum trade size there) partial-filled at 0.3. Old code computed
+    yes_filled = int(0.3) = 0, logged "did not fill", and walked away from
+    a real unhedged position that later lost its full stake at settlement.
+    Fill sizes must survive as fractions all the way through the hedge.
+    """
+    client = FakeClient(LADDER, fills={"p-gte1": 0.3, "p-gte2": 0.3}, report_status="unknown")
+    bot = make_bot(client)
+    locks = find_ladder_locks(LADDER, set(), budget_cents=500)
+    spent = bot._place_lock(locks[0], budget_cents=500)
+
+    assert len(client.orders) == 2              # the NO leg must actually be attempted
+    assert client.positions["p-gte1"] == 0.3
+    assert client.positions["p-gte2"] == -0.3
+    assert spent > 0
+    assert bot._halted_reason is None
+
+
 def test_unhedgeable_leg_is_flattened():
     """YES fills, NO cannot — the long must be sold back, not kept."""
     client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 0}, report_status="unknown")
