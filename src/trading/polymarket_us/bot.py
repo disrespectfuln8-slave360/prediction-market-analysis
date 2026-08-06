@@ -29,6 +29,12 @@ So the rules here are:
      scan are being sent against quotes that have already moved.
   5. If an unhedged remainder cannot be flattened, stop trading and say so.
      Carrying naked directional risk is worse than placing no trades.
+  6. The NO leg's price is re-read immediately before it's sent, not reused
+     from the pre-YES-leg requote — see the 2026-08-05 zero-fill incidents,
+     where four locks sent an IOC NO order priced off a quote that had gone
+     stale during the YES leg's placement and FILL_POLL readback, and missed
+     the book entirely (0 filled, never a partial) because IOC leaves zero
+     price buffer to absorb a moved touch.
 
 Rule 1 had a second blind spot found live on 2026-08-03: get_positions()
 told the truth, but this file threw part of it away. Some markets fill in
@@ -212,6 +218,25 @@ class LadderArbBot:
             return None
         return m1.yes_ask, m2.yes_bid, max_contracts
 
+    def _refresh_sell_price(self, slug: str, fallback: int) -> int:
+        """Last look at the NO-side book, taken immediately before the NO leg
+        is sent — not the sell_price _requote() captured. That value is stale
+        by the time it's spent: the YES leg still has to be placed and its
+        fill confirmed through FILL_POLL first (see rule 6 above), and the
+        NO leg goes in IOC with zero price buffer, so a stale price is a
+        clean miss, not a partial fill. Any read failure or an emptied book
+        falls back to the last-known price — the flatten-or-halt path below
+        still catches whatever the NO leg does with it.
+        """
+        try:
+            fresh = self.client.get_market(slug)
+        except Exception as exc:
+            logger.warning("NO-side re-check failed for %s, using last quote: %s", slug, exc)
+            return fallback
+        if fresh.yes_bid is None:
+            return fallback
+        return fresh.yes_bid
+
     # ── Flattening ───────────────────────────────────────────────────────────
 
     def _flatten_long(self, slug: str, count: float) -> bool:
@@ -292,6 +317,13 @@ class LadderArbBot:
         spent = yes_filled * buy_price
 
         before_sell = self._net_position(lock.sell_slug)
+        fresh_sell_price = self._refresh_sell_price(lock.sell_slug, sell_price)
+        if fresh_sell_price != sell_price:
+            logger.info(
+                "NO-side quote moved for %s between requote and placement: %dc -> %dc",
+                lock.sell_slug, sell_price, fresh_sell_price,
+            )
+        sell_price = fresh_sell_price
         try:
             self.client.place_order(
                 market_slug=lock.sell_slug, side="no",

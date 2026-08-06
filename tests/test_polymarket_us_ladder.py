@@ -9,6 +9,8 @@ that says otherwise.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.trading.polymarket_us.bot import LadderArbBot
 from src.trading.polymarket_us.models import Market, Order, Position
 from src.trading.polymarket_us.strategy import (
@@ -499,3 +501,102 @@ def test_stale_edge_is_rejected_at_requote():
 
     assert spent == 0
     assert client.orders == []                 # never sent a thing
+
+
+# ── Stale NO-side price at placement (2026-08-05 zero-fill incidents) ────────
+
+class MovingBookFakeClient(FakeClient):
+    """A NO-side book whose bid ticks down between the requote and the
+    moment the NO leg is actually sent — reproducing the timing race behind
+    the 2026-08-05 incidents (get_market() on live astatc-* markets moved
+    inside single-digit-second poll gaps, well within
+    _requote() -> YES leg -> FILL_POLL -> NO leg).
+
+    get_market(sell_slug) returns `initial_bid` on its first call (the
+    _requote() read) and `moved_bid` on every call after. place_order's
+    NO-leg fill is decided against the true live bid (`moved_bid` — time has
+    passed by send time regardless of whether the bot re-checked), not a
+    fixed fill dict, so a stale price genuinely misses and a fresh price
+    genuinely crosses.
+    """
+
+    def __init__(self, markets, sell_slug, buy_slug, initial_bid, moved_bid,
+                 yes_fill_count, balance=500):
+        super().__init__(markets, fills={buy_slug: yes_fill_count}, balance=balance)
+        self.sell_slug = sell_slug
+        self._bid = initial_bid
+        self._moved_bid = moved_bid
+
+    def get_market(self, slug):
+        if slug == self.sell_slug:
+            current = replace(self._markets[slug], yes_bid=self._bid)
+            self._bid = self._moved_bid  # subsequent reads see the moved book
+            return current
+        return self._markets[slug]
+
+    def place_order(self, market_slug, side, count, yes_price, immediate_or_cancel=False):
+        self.orders.append((market_slug, side, count, yes_price, immediate_or_cancel))
+        if market_slug == self.sell_slug and side == "no":
+            filled = count if yes_price <= self._moved_bid else 0  # ground truth at send time
+        else:
+            filled = min(count, self._fills.get(market_slug, 0))
+        signed = filled if side == "yes" else -filled
+        self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
+        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
+                     count=count, price_cents=yes_price, status="unknown")
+
+
+def test_no_leg_repriced_when_book_moves_after_requote():
+    """The 2026-08-05 incidents: bid=50 at requote time, ticked to 47 by
+    the time the NO leg is actually sent (after the YES leg + FILL_POLL).
+    Old code sends yes_price=50 (stale) -> 50 <= 47 is False -> 0 filled ->
+    forced flatten of the YES leg, a realized loss. Fixed code re-reads
+    the book immediately before sending -> yes_price=47 -> crosses -> hedged.
+    """
+    markets = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40),
+        make_market("p-gte2", yes_bid=50, yes_ask=52),  # requote() sees bid=50
+    ]
+    client = MovingBookFakeClient(
+        markets, sell_slug="p-gte2", buy_slug="p-gte1",
+        initial_bid=50, moved_bid=47, yes_fill_count=5,
+    )
+    bot = make_bot(client)
+    lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
+
+    bot._place_lock(lock, budget_cents=500)
+
+    no_order = [o for o in client.orders if o[1] == "no"][0]
+    assert no_order[3] == 47, "NO leg must be priced off the fresh bid, not the stale requote"
+    assert client.positions["p-gte1"] == 5     # hedged, not flattened
+    assert client.positions["p-gte2"] == -5
+    assert client.sells == []                  # no forced unwind
+
+
+def test_no_leg_falls_back_to_last_quote_if_refresh_fails():
+    """A transient error on the extra pre-send read must not block the
+    hedge attempt outright — fall back to the last-known price, exactly
+    as today, and let the existing flatten-or-halt path handle whatever
+    happens next."""
+    class FlakyRefreshClient(FakeClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._sell_calls = 0
+
+        def get_market(self, slug):
+            if slug == "p-gte2":
+                self._sell_calls += 1
+                if self._sell_calls >= 2:
+                    raise RuntimeError("boom")
+            return super().get_market(slug)
+
+    client = FlakyRefreshClient(LADDER, fills={"p-gte1": 5, "p-gte2": 5}, report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(LADDER, set(), budget_cents=500)[0]
+
+    bot._place_lock(lock, budget_cents=500)
+
+    no_order = [o for o in client.orders if o[1] == "no"][0]
+    assert no_order[3] == 50   # fell back to the original _requote() price
+    assert client.positions["p-gte1"] == 5
+    assert bot._halted_reason is None
