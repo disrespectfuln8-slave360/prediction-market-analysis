@@ -521,15 +521,24 @@ class MovingBookFakeClient(FakeClient):
     """
 
     def __init__(self, markets, sell_slug, buy_slug, initial_bid, moved_bid,
-                 yes_fill_count, balance=500):
+                 yes_fill_count, balance=500, moved_bid_depth=None):
         super().__init__(markets, fills={buy_slug: yes_fill_count}, balance=balance)
         self.sell_slug = sell_slug
         self._bid = initial_bid
         self._moved_bid = moved_bid
+        self._moved_bid_depth = moved_bid_depth
+        self._sell_slug_reads = 0
 
     def get_market(self, slug):
         if slug == self.sell_slug:
-            current = replace(self._markets[slug], yes_bid=self._bid)
+            self._sell_slug_reads += 1
+            overrides = {"yes_bid": self._bid}
+            # Only the refresh read (the second one) sees a depth override —
+            # the first (_requote's) read must stay unaffected so sizing
+            # isn't disturbed by a test targeting the later re-check.
+            if self._sell_slug_reads > 1 and self._moved_bid_depth is not None:
+                overrides["bid_depth"] = self._moved_bid_depth
+            current = replace(self._markets[slug], **overrides)
             self._bid = self._moved_bid  # subsequent reads see the moved book
             return current
         return self._markets[slug]
@@ -571,6 +580,53 @@ def test_no_leg_repriced_when_book_moves_after_requote():
     assert client.positions["p-gte1"] == 5     # hedged, not flattened
     assert client.positions["p-gte2"] == -5
     assert client.sells == []                  # no forced unwind
+
+
+def test_no_leg_skipped_when_book_empties_before_placement():
+    """Depth is refreshed on the same call as price. A read of bid_depth<=0
+    right before placement means there's truly nothing to hit — skip the
+    order outright (straight to flatten) rather than sending a guaranteed
+    miss."""
+    markets = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40),
+        make_market("p-gte2", yes_bid=50, yes_ask=52),
+    ]
+    client = MovingBookFakeClient(
+        markets, sell_slug="p-gte2", buy_slug="p-gte1",
+        initial_bid=50, moved_bid=50, yes_fill_count=5, moved_bid_depth=0,
+    )
+    bot = make_bot(client)
+    lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
+
+    bot._place_lock(lock, budget_cents=500)
+
+    assert [o for o in client.orders if o[1] == "no"] == [], \
+        "must not send a NO order into a book with zero depth"
+    assert client.positions["p-gte1"] == 0     # flattened, not left naked
+    assert client.sells
+
+
+def test_no_leg_skipped_when_refreshed_price_would_lock_in_a_loss():
+    """A price move severe enough that hedging at it would lock in a loss
+    (rather than cap one) must not be hedged at all — a fresh price is not
+    a fresh approval to trade at any price."""
+    markets = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40),
+        make_market("p-gte2", yes_bid=50, yes_ask=52),  # requote() sees bid=50
+    ]
+    client = MovingBookFakeClient(
+        markets, sell_slug="p-gte2", buy_slug="p-gte1",
+        initial_bid=50, moved_bid=35, yes_fill_count=5,  # 40 + (100-35) > 100
+    )
+    bot = make_bot(client)
+    lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
+
+    bot._place_lock(lock, budget_cents=500)
+
+    assert [o for o in client.orders if o[1] == "no"] == [], \
+        "must not send a NO order priced to lock in a loss"
+    assert client.positions["p-gte1"] == 0     # flattened, not left naked
+    assert client.sells
 
 
 def test_no_leg_falls_back_to_last_quote_if_refresh_fails():

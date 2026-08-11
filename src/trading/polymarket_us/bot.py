@@ -34,7 +34,12 @@ So the rules here are:
      where four locks sent an IOC NO order priced off a quote that had gone
      stale during the YES leg's placement and FILL_POLL readback, and missed
      the book entirely (0 filled, never a partial) because IOC leaves zero
-     price buffer to absorb a moved touch.
+     price buffer to absorb a moved touch. That re-read also carries fresh
+     depth, and the order is skipped outright (straight to flatten) rather
+     than sent if the book has emptied (depth<=0) or moved far enough that
+     hedging at the fresh price would lock in a loss instead of capping one
+     (buy_price + (100 - fresh_sell_price) >= 100) — re-quoting a price is
+     not the same as re-approving the trade at any price.
 
 Rule 1 had a second blind spot found live on 2026-08-03: get_positions()
 told the truth, but this file threw part of it away. Some markets fill in
@@ -224,24 +229,27 @@ class LadderArbBot:
             return None
         return m1.yes_ask, m2.yes_bid, max_contracts
 
-    def _refresh_sell_price(self, slug: str, fallback: int) -> int:
+    def _refresh_sell_quote(self, slug: str, fallback_price: int) -> tuple[int, Optional[float]]:
         """Last look at the NO-side book, taken immediately before the NO leg
-        is sent — not the sell_price _requote() captured. That value is stale
-        by the time it's spent: the YES leg still has to be placed and its
-        fill confirmed through FILL_POLL first (see rule 6 above), and the
-        NO leg goes in IOC with zero price buffer, so a stale price is a
-        clean miss, not a partial fill. Any read failure or an emptied book
-        falls back to the last-known price — the flatten-or-halt path below
-        still catches whatever the NO leg does with it.
+        is sent — not the sell_price/depth _requote() captured. Both are
+        stale by the time they're spent: the YES leg still has to be placed
+        and its fill confirmed through FILL_POLL first (see rule 6 above),
+        and the NO leg goes in IOC with zero price buffer, so a stale price
+        is a clean miss, not a partial fill. Depth comes back on the same
+        call for free, so it's refreshed too rather than trusting the
+        pre-YES-leg reading. Any read failure or an emptied book falls back
+        to the last-known price with unknown depth — the caller's own
+        depth/price sanity check and the flatten-or-halt path below still
+        catch whatever happens next.
         """
         try:
             fresh = self.client.get_market(slug)
         except Exception as exc:
             logger.warning("NO-side re-check failed for %s, using last quote: %s", slug, exc)
-            return fallback
+            return fallback_price, None
         if fresh.yes_bid is None:
-            return fallback
-        return fresh.yes_bid
+            return fallback_price, None
+        return fresh.yes_bid, fresh.bid_depth
 
     # ── Flattening ───────────────────────────────────────────────────────────
 
@@ -323,24 +331,42 @@ class LadderArbBot:
         spent = yes_filled * buy_price
 
         before_sell = self._net_position(lock.sell_slug)
-        fresh_sell_price = self._refresh_sell_price(lock.sell_slug, sell_price)
+        fresh_sell_price, fresh_sell_depth = self._refresh_sell_quote(lock.sell_slug, sell_price)
         if fresh_sell_price != sell_price:
             logger.info(
                 "NO-side quote moved for %s between requote and placement: %dc -> %dc",
                 lock.sell_slug, sell_price, fresh_sell_price,
             )
         sell_price = fresh_sell_price
-        try:
-            self.client.place_order(
-                market_slug=lock.sell_slug, side="no",
-                count=yes_filled, yes_price=sell_price, immediate_or_cancel=True,
-            )
-        except Exception as exc:
-            logger.error("NO leg order rejected on %s: %s", lock.sell_slug, exc)
 
-        # Buying NO is a short, so the net position moves negative.
-        after_sell = self._position_after_order(lock.sell_slug, before_sell)
-        no_filled = before_sell - after_sell
+        # A fresh price is not a fresh approval to trade at any price: only
+        # send the order if the book still has size and hedging at this
+        # price would still cap a loss rather than lock one in. Skipping
+        # here routes straight into the same unhedged/flatten path below as
+        # an outright 0 fill — cheaper than sending an order guaranteed to
+        # either miss (empty book) or hurt (adverse enough price).
+        no_filled = 0.0
+        if fresh_sell_depth is not None and fresh_sell_depth <= 0:
+            logger.info("NO-side book for %s emptied before placement — skipping the order",
+                        lock.sell_slug)
+        elif buy_price + (100 - sell_price) >= 100:
+            logger.info(
+                "NO-side price for %s moved too far to hedge profitably "
+                "(%dc + %dc >= 100c) — skipping the order",
+                lock.sell_slug, buy_price, 100 - sell_price,
+            )
+        else:
+            try:
+                self.client.place_order(
+                    market_slug=lock.sell_slug, side="no",
+                    count=yes_filled, yes_price=sell_price, immediate_or_cancel=True,
+                )
+            except Exception as exc:
+                logger.error("NO leg order rejected on %s: %s", lock.sell_slug, exc)
+
+            # Buying NO is a short, so the net position moves negative.
+            after_sell = self._position_after_order(lock.sell_slug, before_sell)
+            no_filled = before_sell - after_sell
         spent += max(0.0, no_filled) * (100 - sell_price)
 
         unhedged = yes_filled - max(0.0, no_filled)
