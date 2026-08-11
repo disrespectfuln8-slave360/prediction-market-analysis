@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from src.trading.polymarket_us.bot import LadderArbBot
+from src.trading.polymarket_us.bot import MIN_BALANCE_CENTS, LadderArbBot
 from src.trading.polymarket_us.models import Market, Order, Position
 from src.trading.polymarket_us.strategy import (
     MAX_SPREAD_CENTS,
@@ -599,4 +599,26 @@ def test_no_leg_falls_back_to_last_quote_if_refresh_fails():
     no_order = [o for o in client.orders if o[1] == "no"][0]
     assert no_order[3] == 50   # fell back to the original _requote() price
     assert client.positions["p-gte1"] == 5
+    assert bot._halted_reason is None
+
+
+# ── Minimum-balance floor ─────────────────────────────────────────────────────
+
+def test_scan_halts_and_stops_trading_at_the_balance_floor():
+    """A bad stretch must stop on its own before the stake is gone, not after."""
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 5}, balance=MIN_BALANCE_CENTS)
+    bot = make_bot(client)
+
+    bot._scan_once()
+
+    assert bot._halted_reason is not None
+    assert client.orders == []
+
+
+def test_scan_keeps_trading_one_cent_above_the_floor():
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 5}, balance=MIN_BALANCE_CENTS + 1)
+    bot = make_bot(client)
+
+    bot._scan_once()
+
     assert bot._halted_reason is None

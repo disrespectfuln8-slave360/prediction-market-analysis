@@ -99,6 +99,12 @@ UNKNOWN_DEPTH_CONTRACTS = 1
 # Anything at or below this is "didn't move" noise, not a real fill.
 FILL_EPSILON = 1e-6
 
+# Stop trading once the account balance falls to or below this floor, so a
+# bad stretch can't grind the stake all the way to zero. Deliberately a real
+# buffer above $0, not $0 itself — checked once per scan, so a floor of
+# exactly zero would still let one more bad trade cross into negative/empty.
+MIN_BALANCE_CENTS = 100  # $1.00
+
 
 def _fmt_qty(x: float) -> str:
     """Compact display for a fractional contract count: "2" not "2.0",
@@ -394,6 +400,17 @@ class LadderArbBot:
             "restart the bot.", reason,
         )
 
+    def _halt_low_balance(self, balance_cents: int) -> None:
+        self._halted_reason = (
+            f"balance ${balance_cents / 100:.2f} at or below the "
+            f"${MIN_BALANCE_CENTS / 100:.2f} floor"
+        )
+        logger.error(
+            "CRITICAL: trading halted — balance $%.2f is at or below the $%.2f "
+            "floor. Re-fund the account and restart the bot to resume.",
+            balance_cents / 100, MIN_BALANCE_CENTS / 100,
+        )
+
     # ── Scan loop ────────────────────────────────────────────────────────────
 
     def _scan_once(self):
@@ -414,6 +431,8 @@ class LadderArbBot:
         # size, and without it a well-funded account (the $1,000 paper ledger,
         # say) would silently size up to MAX_CONTRACTS on every lock.
         balance = self.client.get_balance()
+        if balance <= MIN_BALANCE_CENTS and not self._halted_reason:
+            self._halt_low_balance(balance)
         budget = min(self.max_lock_budget_cents, int(balance * BALANCE_SAFETY_FRACTION))
 
         markets = self.client.list_all_markets(active=True, closed=False)
