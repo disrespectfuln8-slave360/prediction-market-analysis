@@ -60,6 +60,15 @@ _TITLE_BELOW = re.compile(r"^(\d+)\s+or\s+below$")
 _TITLE_ABOVE = re.compile(r"^(\d+)\s+or\s+above$")
 
 
+def local_today(city: str) -> str:
+    """Today's date in `city`'s own local timezone -- shared with
+    src/trading/polymarket_us/apex/weather_model.py, which needs the same
+    per-city "what date is it there right now" logic to find today's open
+    bucket markets."""
+    tz = ZoneInfo(CITY_STATIONS[city][1])
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
 def parse_bucket_bounds(title: str) -> Optional[tuple]:
     """(low, high) inclusive integer F bounds; None end = unbounded."""
     t = title.strip()
@@ -86,8 +95,7 @@ class WeatherQuoteLogger:
     # ── Discovery ────────────────────────────────────────────────────────────
 
     def _local_today(self, city: str) -> str:
-        tz = ZoneInfo(CITY_STATIONS[city][1])
-        return datetime.now(tz).strftime("%Y-%m-%d")
+        return local_today(city)
 
     def _discover(self) -> None:
         """One full catalog scan; refresh each city whose local date rolled."""

@@ -79,15 +79,13 @@ called. No order-placing method is imported, let alone called.
 from __future__ import annotations
 
 import logging
-import re
+import os
 import shutil
 import tempfile
-import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -95,6 +93,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from src.trading.polymarket_us.models import Market, _amount_to_cents
+from src.trading.polymarket_us.nbm_forecast import cleanup_nbm_cache, fetch_nbm_forecast
 from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
 from src.trading.polymarket_us.weather_quote_logger import CITY_STATIONS, parse_bucket_bounds
 
@@ -107,11 +106,7 @@ BUCKET_WIDTH = 2  # tc-temp-...-gte{N}lt{N+1}f covers N and N+1 -> 2F wide
 BUCKET_LOW_F = 0
 BUCKET_HIGH_F = 132  # a little past the "0-130F is safe" guidance, cheap insurance
 
-NBM_BASE_URL = "https://noaa-nbm-grib2-pds.s3.amazonaws.com"
-NBM_LEAD_HOURS = 15.0  # see module docstring — midpoint of the 12-18h target window
 NBM_CACHE_DIR = Path(tempfile.gettempdir()) / "pmus_weather_backfill_nbm_cache"
-NBM_LABEL_WIDTH = 5
-NBM_FIELD_WIDTH = 3
 
 OUT_DIR = Path("data/polymarket_us/weather_history")
 OUT_PATH = OUT_DIR / "weather_history.parquet"
@@ -246,168 +241,6 @@ def _extract_settlement(payload: Optional[dict]) -> Optional[int]:
     return None
 
 
-# ── NOAA NBM forecast fetch/parse ───────────────────────────────────────────
-
-def _target_cycle_utc(tzname: str, d: str) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(tzname)
-    local_date = datetime.strptime(d, "%Y-%m-%d").date()
-    local_midnight = datetime(local_date.year, local_date.month, local_date.day, tzinfo=tz)
-    target_utc = local_midnight.astimezone(timezone.utc)
-    cycle_utc = (target_utc - timedelta(hours=NBM_LEAD_HOURS)).replace(minute=0, second=0, microsecond=0)
-    return cycle_utc, target_utc
-
-
-def _nbm_cache_key(cycle_utc: datetime) -> tuple[str, str]:
-    return cycle_utc.strftime("%Y%m%d"), cycle_utc.strftime("%H")
-
-
-def _nbm_url(cycle_utc: datetime) -> str:
-    yyyymmdd, hh = _nbm_cache_key(cycle_utc)
-    return f"{NBM_BASE_URL}/blend.{yyyymmdd}/{hh}/text/blend_nbstx.t{hh}z"
-
-
-def _download_cycle(nbm_http: httpx.Client, cycle_utc: datetime, attempts: int = 3) -> Path:
-    yyyymmdd, hh = _nbm_cache_key(cycle_utc)
-    NBM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dest = NBM_CACHE_DIR / f"blend_nbstx_{yyyymmdd}_{hh}.txt"
-    url = _nbm_url(cycle_utc)
-
-    last_exc = None
-    for attempt in range(attempts):
-        try:
-            with nbm_http.stream("GET", url) as r:
-                r.raise_for_status()
-                with dest.open("wb") as f:
-                    for chunk in r.iter_bytes(chunk_size=1 << 20):
-                        f.write(chunk)
-            return dest
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            last_exc = exc
-            dest.unlink(missing_ok=True)
-            if attempt < attempts - 1:
-                time.sleep(2 ** attempt)
-    raise last_exc
-
-
-def _parse_fixed_row(line: str) -> tuple[str, list[str]]:
-    label = line[:NBM_LABEL_WIDTH].strip()
-    rest = line[NBM_LABEL_WIDTH:]
-    vals = [rest[i:i + NBM_FIELD_WIDTH].strip() for i in range(0, len(rest), NBM_FIELD_WIDTH)]
-    return label, vals
-
-
-def _extract_station_txn(path: Path, station: str):
-    """(fhr_vals, txn_vals, xnd_vals) for one station's block, or None if not found."""
-    header_re = re.compile(rf"^ {re.escape(station)}\s+NBM")
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        lines = iter(f)
-        for line in lines:
-            if not header_re.match(line):
-                continue
-            fhr = txn = xnd = None
-            # FHR/TXN/XND always land in the first few rows after the header
-            # (DT, UTC, FHR, TXN, XND, ...) — 10 is generous slack.
-            for _ in range(10):
-                row = next(lines, None)
-                if row is None:
-                    break
-                label, vals = _parse_fixed_row(row.rstrip("\n"))
-                if label == "FHR":
-                    fhr = vals
-                elif label == "TXN":
-                    txn = vals
-                elif label == "XND":
-                    xnd = vals
-                if fhr and txn and xnd:
-                    break
-            return fhr, txn, xnd
-    return None
-
-
-def _select_tx(fhr_vals, txn_vals, xnd_vals, cycle_utc: datetime, tz: ZoneInfo, target_date: date):
-    """The (mu, sigma) TX/XND pair whose valid local date == target_date, or None.
-
-    TXN alternates TX (max, valid hour == 00Z) and TN (min, valid hour ==
-    12Z) — see module docstring. Only 00Z slots are candidates.
-    """
-    if not (fhr_vals and txn_vals and xnd_vals):
-        return None
-    for f_s, t_s, x_s in zip(fhr_vals, txn_vals, xnd_vals):
-        if not f_s or not t_s:
-            continue
-        try:
-            fhr = int(f_s)
-        except ValueError:
-            continue
-        valid_utc = cycle_utc + timedelta(hours=fhr)
-        if valid_utc.hour != 0:
-            continue
-        if valid_utc.astimezone(tz).date() != target_date:
-            continue
-        try:
-            mu = float(t_s)
-            sigma = float(x_s) if x_s else None
-        except ValueError:
-            return None
-        return mu, sigma
-    return None
-
-
-def _get_or_download_cycle(nbm_http: httpx.Client, cache: dict, cycle_utc: datetime) -> Optional[Path]:
-    key = _nbm_cache_key(cycle_utc)
-    if key in cache:
-        return cache[key]  # may be None if this cycle already failed today
-    try:
-        path = _download_cycle(nbm_http, cycle_utc)
-    except Exception as exc:
-        logger.warning("NBM download failed for cycle %s: %s", key, exc)
-        cache[key] = None
-        return None
-    cache[key] = path
-    return path
-
-
-def fetch_nbm_forecast(nbm_http: httpx.Client, cache: dict, city: str, d: str) -> Optional[dict]:
-    station, tzname = CITY_STATIONS[city]
-    tz = ZoneInfo(tzname)
-    cycle_utc, target_utc = _target_cycle_utc(tzname, d)
-
-    path = _get_or_download_cycle(nbm_http, cache, cycle_utc)
-    if path is None:
-        return None
-
-    try:
-        parsed = _extract_station_txn(path, station)
-    except OSError as exc:
-        logger.warning("Failed reading cached NBM file for %s: %s", station, exc)
-        return None
-    if parsed is None:
-        logger.warning("Station %s not found in NBM bulletin for cycle %s", station, cycle_utc.isoformat())
-        return None
-
-    target_date = datetime.strptime(d, "%Y-%m-%d").date()
-    sel = _select_tx(*parsed, cycle_utc=cycle_utc, tz=tz, target_date=target_date)
-    if sel is None or sel[1] is None:
-        logger.warning("No usable TX/XND slot for %s %s in cycle %s", station, d, cycle_utc.isoformat())
-        return None
-
-    mu, sigma = sel
-    lead_hours = (target_utc - cycle_utc).total_seconds() / 3600.0
-    return {
-        "forecast_mu": mu,
-        "forecast_sigma": sigma,
-        "forecast_cycle": cycle_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "lead_hours": round(lead_hours, 2),
-    }
-
-
-def _cleanup_nbm_cache(cache: dict) -> None:
-    for path in cache.values():
-        if path is not None:
-            path.unlink(missing_ok=True)
-    cache.clear()
-
-
 # ── Orchestration ────────────────────────────────────────────────────────────
 
 def _date_range(start: str, end_exclusive: date) -> list[str]:
@@ -436,7 +269,7 @@ def process_city_day(
         return [], guess_n, "no_buckets"
     markets, next_guess_n = discovery
 
-    forecast = fetch_nbm_forecast(nbm_http, nbm_cache, city, d)
+    forecast = fetch_nbm_forecast(nbm_http, nbm_cache, city, d, CITY_STATIONS, NBM_CACHE_DIR)
     if forecast is None:
         return [], next_guess_n, "no_forecast"
 
@@ -519,13 +352,20 @@ def main():
                         city_day_status[status] += 1
                         pbar.update(1)
                         pbar.set_postfix(rows=len(rows))
-                    _cleanup_nbm_cache(nbm_cache)
+                    cleanup_nbm_cache(nbm_cache)
         finally:
             nbm_http.close()
             shutil.rmtree(NBM_CACHE_DIR, ignore_errors=True)
 
     df = pd.DataFrame(rows, columns=SCHEMA_COLUMNS)
-    df.to_parquet(OUT_PATH, index=False)
+    # Atomic write: a run that dies partway through (network blip, killed
+    # process -- this backfill runs for hours against a live API and has
+    # been interrupted mid-run in practice) must never leave a truncated
+    # or half-written parquet file where Apex's calibration gate expects a
+    # complete one.
+    tmp_path = OUT_PATH.with_suffix(".tmp")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, OUT_PATH)
 
     processed = sum(city_day_status.values())
     ok = city_day_status.get("ok", 0)
