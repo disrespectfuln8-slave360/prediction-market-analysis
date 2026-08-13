@@ -82,13 +82,35 @@ def test_hard_position_cap_binds_on_a_large_edge():
 
 
 def test_cash_reserve_shrinks_a_trade_when_edge_is_below_the_override():
-    # bankroll=$10, only $4.20 in cash -- the 40% reserve floor is $4.00, so
-    # only $0.20 is actually spendable, well under what quarter/hard-cap
-    # sizing would otherwise take.
-    decision = risk.evaluate(model_prob=0.65, price_cents=50, bankroll_cents=1000, cash_cents=420)
+    # bankroll=$10, only $4.40 in cash -- the 40% reserve floor is $4.00, so
+    # only $0.40 is actually spendable, well under what quarter/hard-cap
+    # sizing would otherwise take (and still above the minimum viable stake).
+    decision = risk.evaluate(model_prob=0.65, price_cents=50, bankroll_cents=1000, cash_cents=440)
     assert decision.action == "buy"
     assert decision.edge_fraction < risk.HIGH_EDGE_OVERRIDE_FRACTION
-    assert decision.stake_cents == 20  # 420 - reserve(400)
+    assert decision.stake_cents == 40  # 440 - reserve(400)
+
+
+def test_reserve_squeeze_below_the_minimum_stake_is_a_pass():
+    # Same reserve squeeze as above, but tighter: only $0.20 would be left
+    # to spend (420 - reserve(400)), which is below MIN_STAKE_CENTS. A
+    # technically-positive stake this small isn't worth a real order.
+    decision = risk.evaluate(model_prob=0.65, price_cents=50, bankroll_cents=1000, cash_cents=420)
+    assert decision.action == "pass"
+    assert decision.stake_cents == 0
+    assert "minimum viable size" in decision.reason
+
+
+def test_min_stake_floor_rejects_a_negligible_liquidity_capped_stake():
+    # A cheap longshot price plus thin book depth can pass every other gate
+    # (edge, Kelly, cash reserve) and still size down to a couple of cents
+    # once the liquidity cap bites.
+    decision = risk.evaluate(
+        model_prob=0.9, price_cents=2, bankroll_cents=100_000, cash_cents=100_000, max_contracts=1,
+    )
+    assert decision.action == "pass"
+    assert decision.stake_cents == 0
+    assert "minimum viable size" in decision.reason
 
 
 def test_high_edge_overrides_the_cash_reserve_floor():
@@ -537,6 +559,33 @@ def test_recorded_cost_includes_the_taker_fee(tmp_path, monkeypatch):
     assert trade["cost_cents"] > raw_cost
     fee_per_contract = taker_fee_cents(trade["price_cents"], 1)
     assert trade["cost_cents"] == raw_cost + round(trade["count"] * fee_per_contract)
+
+
+def test_tiny_fractional_fill_is_never_recorded_as_costing_zero(tmp_path, monkeypatch):
+    """A thin book can fill only a sliver of the requested size (IOC kills
+    the rest). At a cheap enough price, that sliver's cost rounds to
+    literally 0c even though a real position was acquired -- a real fill
+    must always cost at least 1c in the ledger."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = BucketGrounding(
+        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
+        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
+        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+    )
+    fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
+    # Only 0.01 contracts actually fill, far below the ~1.25 the sizing
+    # math requested -- a thin book taking just a sliver of an IOC order.
+    client = FakeApexClient([market], fills={SLUG: 0.01})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, fake_grounding, memory)
+    bot._scan_once()
+
+    assert len(memory.open_trades()) == 1
+    trade = memory.open_trades()[0]
+    assert trade["count"] == pytest.approx(0.01)
+    assert trade["cost_cents"] >= 1  # never zero for a real, non-negligible fill
 
 
 class DelayedFillOnErrorClient(FakeApexClient):

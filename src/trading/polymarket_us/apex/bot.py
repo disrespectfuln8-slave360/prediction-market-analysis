@@ -293,6 +293,14 @@ class ApexBot:
         # for edge/Kelly purposes.
         fee_cents = round(filled * taker_fee_cents(cost_price_cents, 1))
         cost_cents = round(filled * cost_price_cents) + fee_cents
+        # filled is real and non-negligible by this point (checked above),
+        # but at a cheap enough price or thin enough fill this can still
+        # round to literally 0c -- recording a real position as costing
+        # nothing corrupts cost-basis math downstream and hides real spend
+        # from the scan loop's cash_cents bookkeeping. A real fill must
+        # never be booked as free.
+        if cost_cents <= 0:
+            cost_cents = 1
         rationale = llm.generate_rationale({
             "action": "buy", "market_slug": slug, "city": grounding.city,
             "low": grounding.low, "high": grounding.high,
