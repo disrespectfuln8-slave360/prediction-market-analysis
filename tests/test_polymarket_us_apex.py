@@ -482,7 +482,11 @@ def test_stale_calibration_history_blocks_trading(tmp_path, monkeypatch):
     bot._scan_once()
 
     assert client.orders == []
-    assert fake_grounding.reload_calls == 0  # never got past the staleness gate
+    # reload_calibration() must run before the staleness check, not after --
+    # see test_history_file_appearing_after_startup_is_discovered_on_next_scan
+    # for why checking staleness first would prevent a history file from
+    # ever being discovered once it appears.
+    assert fake_grounding.reload_calls == 1
 
 
 def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
@@ -674,6 +678,37 @@ def test_check_external_balance_terminates_independent_of_the_tracked_ledger(tmp
 
     assert memory.is_terminated()
     assert "real exchange balance" in memory.terminated_reason
+
+
+def test_history_file_appearing_after_startup_is_discovered_on_next_scan(tmp_path, monkeypatch):
+    """Regression test for a live incident: reload_calibration() must run
+    BEFORE history_is_stale() is checked. Checking staleness first means a
+    history file that doesn't exist yet when the engine is constructed --
+    the normal case, since Apex starts before the one-off backfill script
+    has ever completed -- can never be discovered once it does appear: the
+    early return on "stale" permanently prevents reload_calibration() from
+    running again. Apex sat "stale or missing" for 6+ hours after a real
+    backfill finished before this fix."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    history_path = tmp_path / "weather_history.parquet"
+    grounding = WeatherGroundingEngine(history_path=history_path)
+    try:
+        assert grounding._history_max_date is None  # file doesn't exist yet
+
+        # The backfill "finishes" after the engine was already constructed.
+        rows = [{"forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+                  "settlement": 1, "date": "2026-08-12"} for _ in range(30)]
+        pd.DataFrame(rows).to_parquet(history_path)
+
+        client = FakeApexClient([], fills={})
+        memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+        bot = make_bot(client, grounding, memory)
+
+        bot._scan_once()
+
+        assert grounding._history_max_date == "2026-08-12"
+    finally:
+        grounding.close()
 
 
 def test_halted_bot_stops_trading_and_only_reports(tmp_path, monkeypatch):

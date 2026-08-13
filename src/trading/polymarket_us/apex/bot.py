@@ -356,6 +356,15 @@ class ApexBot:
             logger.info("[apex] Halted for today -- %s. Observing only.", self.memory.daily_halted_reason)
             return
 
+        # Reload BEFORE checking staleness -- the check reads
+        # self.grounding's cached _history_max_date, which is only ever
+        # updated by reload_calibration(). Checking staleness first means
+        # a history file that didn't exist when the engine was constructed
+        # (the normal case: Apex starts before the one-off backfill script
+        # has ever been run) can never be discovered, because the early
+        # return on "stale" would permanently prevent reload_calibration()
+        # from running again.
+        self.grounding.reload_calibration()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self.grounding.history_is_stale(today):
             logger.warning(
@@ -363,7 +372,6 @@ class ApexBot:
                 "scripts/backfill_weather_history.py before trading. Observing only this scan."
             )
             return
-        self.grounding.reload_calibration()
 
         try:
             markets = self.client.list_all_markets(active=True, closed=False)
