@@ -67,9 +67,16 @@ class BucketGrounding:
     forecast_mu: float
     forecast_sigma: float
     forecast_cycle: str
-    calibration_trustworthy: bool
+    calibration_trustworthy: bool  # YES side: model_prob's own decile
     calibration_note: str
     calibration_sample_count: int
+    calibration_trustworthy_no: bool  # NO side: (1 - model_prob)'s decile -- a
+    # different decile than the YES side whenever model_prob isn't ~50%, so it
+    # needs its own independent calibration check rather than reusing the YES
+    # side's flag (a bucket calibrated as trustworthy at 5% says nothing about
+    # whether the complementary 95% decile has ever been checked).
+    calibration_note_no: str
+    calibration_sample_count_no: int
 
 
 def _bucket_low_pct(prob: float) -> int:
@@ -232,9 +239,12 @@ class WeatherGroundingEngine:
         if mp is None:
             return None
         trustworthy, note, count = self._trustworthiness(mp)
+        trustworthy_no, note_no, count_no = self._trustworthiness(1.0 - mp)
         return BucketGrounding(
             city=city, date=date_str, low=low, high=high, model_prob=mp,
             forecast_mu=forecast["forecast_mu"], forecast_sigma=forecast["forecast_sigma"],
             forecast_cycle=forecast["forecast_cycle"],
             calibration_trustworthy=trustworthy, calibration_note=note, calibration_sample_count=count,
+            calibration_trustworthy_no=trustworthy_no, calibration_note_no=note_no,
+            calibration_sample_count_no=count_no,
         )

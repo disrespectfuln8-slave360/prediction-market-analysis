@@ -302,6 +302,33 @@ def test_trustworthiness_passes_a_well_calibrated_bucket(tmp_path):
         engine.close()
 
 
+def test_evaluate_bucket_checks_trustworthiness_independently_per_side(tmp_path):
+    """The YES side bets on model_prob; the NO side bets on 1 - model_prob --
+    a different decile of the calibration table whenever model_prob isn't
+    ~50%. Regression test: evaluate_bucket used to compute trustworthiness
+    once (off model_prob's own decile) and hand that same flag to both
+    sides, so a bucket calibrated as trustworthy at 5% would silently also
+    green-light a NO bet on the complementary, possibly-unverified 95%."""
+    engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
+    try:
+        # 0-10% decile is well-calibrated; 90-100% (the NO side's real bet)
+        # has no samples at all.
+        engine._calibration = {
+            0: {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 5.0, "mean_predicted": 5.0},
+        }
+        date_str = engine._local_today("nychigh")
+        engine._forecast_cache[("nychigh", date_str)] = {
+            "forecast_mu": 60.0, "forecast_sigma": 1.0, "forecast_cycle": "c",
+        }
+        grounding = engine.evaluate_bucket("nychigh", 80, 81)
+        assert grounding is not None
+        assert grounding.model_prob < 0.10
+        assert grounding.calibration_trustworthy  # YES side: 0-10% decile is calibrated
+        assert not grounding.calibration_trustworthy_no  # NO side: 90-100% decile is unverified
+    finally:
+        engine.close()
+
+
 def test_history_freshness_gate(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
@@ -402,6 +429,8 @@ def test_scan_buys_yes_when_the_model_beats_the_ask(tmp_path, monkeypatch):
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -429,6 +458,8 @@ def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path, monkeypatch):
         forecast_mu=70.0, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -445,6 +476,34 @@ def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path, monkeypatch):
     assert trade["price_cents"] == 30  # the actual NO cost, for bankroll/edge accounting
 
 
+def test_scan_trades_the_no_side_when_only_its_decile_is_calibrated(tmp_path, monkeypatch):
+    """Regression test for the per-side calibration gate: an untrustworthy
+    YES-side decile must not block a NO-side trade whose own decile (1 -
+    model_prob) is independently trustworthy, and vice versa -- the two
+    sides bet on different probabilities and must be gated separately."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    market = make_market(SLUG, yes_bid=95, yes_ask=97)  # NO costs 100-95=5c
+    grounding = BucketGrounding(
+        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.05,
+        forecast_mu=60.0, forecast_sigma=1.0, forecast_cycle="c",
+        calibration_trustworthy=False, calibration_note="only 2 historical samples",
+        calibration_sample_count=2,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 40 samples, 1.0pp measured error",
+        calibration_sample_count_no=40,
+    )
+    fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
+    client = FakeApexClient([market], fills={SLUG: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, fake_grounding, memory)
+    bot._scan_once()
+
+    assert len(client.orders) == 1
+    slug, side, count, yes_price, ioc = client.orders[0]
+    assert side == "no"
+    assert memory.open_trades()[0]["side"] == "no"
+
+
 def test_scan_passes_when_calibration_is_untrustworthy(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
@@ -453,6 +512,8 @@ def test_scan_passes_when_calibration_is_untrustworthy(tmp_path, monkeypatch):
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=False, calibration_note="only 5 historical samples",
         calibration_sample_count=5,
+        calibration_trustworthy_no=False, calibration_note_no="only 5 historical samples",
+        calibration_sample_count_no=5,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -473,6 +534,7 @@ def test_scan_never_stacks_a_second_position_in_the_same_city(tmp_path, monkeypa
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market, make_market(held_slug, yes_bid=50, yes_ask=52)], fills={SLUG: 99})
@@ -496,6 +558,7 @@ def test_terminated_bot_only_observes(tmp_path, monkeypatch):
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -515,6 +578,7 @@ def test_stale_calibration_history_blocks_trading(tmp_path, monkeypatch):
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding(
         {"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding}, stale=True,
@@ -568,6 +632,7 @@ def test_recorded_cost_includes_the_taker_fee(tmp_path, monkeypatch):
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -594,6 +659,7 @@ def test_tiny_fractional_fill_is_never_recorded_as_costing_zero(tmp_path, monkey
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     # Only 0.01 contracts actually fill, far below the ~1.25 the sizing
@@ -644,6 +710,7 @@ def test_exception_path_polls_before_giving_up_on_a_delayed_fill(tmp_path, monke
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = DelayedFillOnErrorClient([market], fills={SLUG: 2.0}, delay_reads=2)
@@ -676,6 +743,7 @@ def test_wrong_direction_fill_halts_instead_of_recording_a_fabricated_trade(tmp_
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = WrongDirectionFillClient([market], fills={SLUG: 99})
@@ -701,6 +769,7 @@ def test_untracked_live_position_halts_before_trading(tmp_path, monkeypatch):
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -725,6 +794,7 @@ def test_reconciliation_ignores_other_bots_live_positions(tmp_path, monkeypatch)
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -789,6 +859,7 @@ def test_halted_bot_stops_trading_and_only_reports(tmp_path, monkeypatch):
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
         forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
         calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
+        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
