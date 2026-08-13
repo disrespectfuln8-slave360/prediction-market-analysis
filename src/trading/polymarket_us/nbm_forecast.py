@@ -50,6 +50,7 @@ needed.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -242,20 +243,44 @@ def cleanup_nbm_cache(cache: dict) -> None:
     cache.clear()
 
 
+def _is_unbounded(x) -> bool:
+    """True for Python None (the live path -- parse_bucket_bounds()'s
+    unbounded-end marker) and for float NaN (the historical path --
+    backfill_weather_history.py writes unbounded ends to the parquet as
+    `float("nan")`, since a real DataFrame column can't hold a mixed
+    None/float column cleanly). A bare `x is None` check missed the NaN
+    case entirely: `nan - 0.5` stays `nan`, and `max(0.0, min(1.0, nan))`
+    silently resolves to exactly 1.0 (Python's min/max never compare True
+    against NaN, so both calls just return their first argument) --
+    every unbounded historical bucket read back a fabricated 100%
+    probability regardless of the real forecast, corroding a third of the
+    calibration table (737 of 2213 backfilled rows) into looking like the
+    model is dramatically overconfident when the bug was in this bounds
+    check, not the model.
+    """
+    if x is None:
+        return True
+    try:
+        return math.isnan(x)
+    except TypeError:
+        return False
+
+
 def bucket_probability(mu: float, sigma: Optional[float], low: Optional[float], high: Optional[float]) -> Optional[float]:
     """P(low <= actual_high <= high) under Normal(mu, sigma), scalar version of the
     same continuity-corrected model used by
     src/analysis/polymarket_us/weather_forecast_calibration.py._add_model_prob
-    (settlement rounds to integer F, hence the +/-0.5F correction). None
-    bounds mean unbounded (-inf/+inf). Returns None if sigma is missing or
-    not positive — a degenerate forecast is not something to size a real bet
-    against.
+    (settlement rounds to integer F, hence the +/-0.5F correction). Both
+    None and NaN bounds mean unbounded (-inf/+inf) -- see _is_unbounded's
+    docstring for why both forms have to be handled. Returns None if sigma
+    is missing or not positive — a degenerate forecast is not something to
+    size a real bet against.
     """
     if sigma is None or sigma <= 0:
         return None
     from scipy.stats import norm
 
-    low_bound = -float("inf") if low is None else low - 0.5
-    high_bound = float("inf") if high is None else high + 0.5
+    low_bound = -float("inf") if _is_unbounded(low) else low - 0.5
+    high_bound = float("inf") if _is_unbounded(high) else high + 0.5
     prob = norm.cdf(high_bound, loc=mu, scale=sigma) - norm.cdf(low_bound, loc=mu, scale=sigma)
     return max(0.0, min(1.0, prob))

@@ -226,6 +226,28 @@ def test_bucket_probability_none_without_sigma():
     assert bucket_probability(75, 0, 74, 76) is None
 
 
+def test_bucket_probability_treats_nan_bounds_as_unbounded_like_none():
+    """Regression test for a live bug: the historical parquet stores
+    unbounded bucket ends as float NaN (backfill_weather_history.py writes
+    `float("nan")`, not None -- a DataFrame column can't hold a mixed
+    None/float column), while the live path (parse_bucket_bounds) uses
+    real None. A bare `x is None` check silently treated every NaN-bounded
+    historical row as if it had a real, tiny bound of `nan - 0.5`, and
+    `max(0.0, min(1.0, nan))` resolved that to exactly 1.0 -- every
+    unbounded bucket in the calibration history read back a fabricated
+    100% probability. Confirmed live: forecast mu=62, sigma=2, threshold
+    ">=65" (1.25 std above the mean, true probability ~10.6%) returned 1.0
+    with NaN and the correct ~10.6% with None before this fix."""
+    p_nan = bucket_probability(62.0, 2.0, 65.0, float("nan"))
+    p_none = bucket_probability(62.0, 2.0, 65.0, None)
+    assert p_nan == pytest.approx(p_none)
+    assert p_nan == pytest.approx(0.1056, abs=1e-3)  # not 1.0
+
+    p_nan_low = bucket_probability(62.0, 2.0, float("nan"), 56.0)
+    p_none_low = bucket_probability(62.0, 2.0, None, 56.0)
+    assert p_nan_low == pytest.approx(p_none_low)
+
+
 def test_bucket_low_pct_clamps_100_percent_to_the_top_decile():
     assert _bucket_low_pct(1.0) == 90
     assert _bucket_low_pct(0.35) == 30
