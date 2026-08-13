@@ -101,15 +101,24 @@ class KalshiTradingClient:
         private_key_path = private_key_path or os.environ["KALSHI_PRIVATE_KEY_PATH"]
         signer = _KalshiSigner(key_id, private_key_path)
         self.http = HttpClient(base_url=host, rate_limit=5, auth_hook=signer)
+        # Order placement must never be silently retried by the shared retry
+        # machinery: a retried POST after a timeout or 5xx that actually
+        # succeeded server-side would place a second, real, duplicate order
+        # with no way for the caller to detect it. A single attempt that
+        # raises on failure is safer than a hidden duplicate order -- same
+        # reasoning as src/trading/polymarket_us/trading_client.py's
+        # order_http.
+        self.order_http = HttpClient(base_url=host, rate_limit=5, auth_hook=signer, max_retries=1)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
-        self.http.close()
+        self.close()
 
     def close(self):
         self.http.close()
+        self.order_http.close()
 
     # ── Market data ─────────────────────────────────────────────────────────
 
@@ -214,7 +223,7 @@ class KalshiTradingClient:
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
-        data = self.http.post("/portfolio/events/orders", json=payload)
+        data = self.order_http.post("/portfolio/events/orders", json=payload)
         # V2 response is flat (no "order" wrapper): {order_id, fill_count, remaining_count, ...}
         remaining = float(data.get("remaining_count", count))
         return Order(
