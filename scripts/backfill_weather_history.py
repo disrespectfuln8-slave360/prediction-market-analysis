@@ -1,10 +1,27 @@
-"""One-shot backfill: resolved polymarket.us daily-high weather buckets x NOAA NBM forecasts.
+"""Incremental backfill: resolved polymarket.us daily-high weather buckets x NOAA NBM forecasts.
 
 Joins every resolved (city, date) bucket-market settlement with the NBM
 forecast that was live "the evening before" that date, and writes the result
 to data/polymarket_us/weather_history/weather_history.parquet for the
 separate calibration analysis (src/analysis/polymarket_us/weather_forecast_calibration.py)
-to score. Run once: python scripts/backfill_weather_history.py
+and Apex's own calibration gate to score.
+
+One-shot: python scripts/backfill_weather_history.py
+Recurring (daemon, re-runs every RELOOP_INTERVAL_SECS): add --loop
+
+This was originally a true one-shot script -- nothing ever re-ran it after
+the initial backfill, and nothing noticed. Same bug class found live on
+Kalshi's side the same night (2026-08-14): an indexer with no ongoing
+schedule silently goes stale, and a silent staleness gate (Apex's own
+STALE_HISTORY_DAYS=3) just quietly stops trading rather than erroring
+loudly. Found here because this file's own max date had drifted to 3 days
+behind, right at that gate. Runs now resume from the day after the latest
+date already in weather_history.parquet (falling back to START_DATE only
+when that file doesn't exist yet) and APPEND rather than rebuild, so a
+recurring run only re-walks the last day or two of new city-days instead
+of the entire history every time -- the original full-rebuild cost (hours,
+per this file's own atomic-write comment below) would make a truly daily
+re-run impractical otherwise.
 
 Market discovery
 -----------------
@@ -78,10 +95,12 @@ called. No order-placing method is imported, let alone called.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +120,13 @@ logger = logging.getLogger("backfill_weather_history")
 
 # Verified live: nothing on this platform resolves before this date.
 START_DATE = "2026-04-29"
+
+# --loop mode's re-check cadence. Frequent enough that a day's settlement
+# lands well within Apex's own STALE_HISTORY_DAYS=3 gate; infrequent enough
+# not to re-hammer the NBM/polymarket.us APIs for data that mostly hasn't
+# changed since the last pass (most of each pass is now just the 1-2 truly
+# new days, but discovery still re-probes each city fresh every time).
+RELOOP_INTERVAL_SECS = 6 * 3600
 
 BUCKET_WIDTH = 2  # tc-temp-...-gte{N}lt{N+1}f covers N and N+1 -> 2F wide
 BUCKET_LOW_F = 0
@@ -314,14 +340,34 @@ def process_city_day(
     return rows, next_guess_n, "ok"
 
 
-def main():
-    load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+def _resume_start_date() -> str:
+    """Day after the latest date already in weather_history.parquet, or
+    START_DATE if that file doesn't exist yet (first-ever run) or can't be
+    read. This is what makes a re-run cheap: without it, every pass would
+    re-walk the entire history from START_DATE, which is exactly the
+    one-shot-forever design this fix replaces."""
+    if not OUT_PATH.exists():
+        return START_DATE
+    try:
+        existing_max = pd.read_parquet(OUT_PATH, columns=["date"])["date"].max()
+    except Exception as exc:
+        logger.warning("Could not read existing %s (%s) — resuming from START_DATE", OUT_PATH, exc)
+        return START_DATE
+    # An empty "date" column comes back from parquet as float NaN, not None
+    # or "" -- and `not float('nan')` is False (NaN is truthy), so a bare
+    # `if not existing_max` misses this case and crashes strptime() below
+    # on a float. pd.isna() is the one check that catches both None and NaN.
+    if pd.isna(existing_max):
+        return START_DATE
+    next_day = datetime.strptime(str(existing_max), "%Y-%m-%d").date() + timedelta(days=1)
+    return next_day.strftime("%Y-%m-%d")
 
-    dates = _date_range(START_DATE, datetime.now(timezone.utc).date())
+
+def run_once() -> None:
+    start = _resume_start_date()
+    dates = _date_range(start, datetime.now(timezone.utc).date())
     if not dates:
-        print("No dates in [START_DATE, today) — nothing to backfill.")
+        print(f"No new dates since {start} — nothing to backfill.")
         return
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -357,7 +403,17 @@ def main():
             nbm_http.close()
             shutil.rmtree(NBM_CACHE_DIR, ignore_errors=True)
 
-    df = pd.DataFrame(rows, columns=SCHEMA_COLUMNS)
+    new_df = pd.DataFrame(rows, columns=SCHEMA_COLUMNS)
+    # Append to whatever's already on disk rather than rebuilding from
+    # START_DATE every time -- that full-rebuild cost (hours, per the
+    # incident this atomic-write comment already describes below) is what
+    # made this a one-shot script in the first place. _resume_start_date()
+    # already guarantees `dates` doesn't overlap what's in OUT_PATH, so
+    # this can't introduce duplicate rows.
+    if OUT_PATH.exists():
+        df = pd.concat([pd.read_parquet(OUT_PATH), new_df], ignore_index=True)
+    else:
+        df = new_df
     # Atomic write: a run that dies partway through (network blip, killed
     # process -- this backfill runs for hours against a live API and has
     # been interrupted mid-run in practice) must never leave a truncated
@@ -369,7 +425,7 @@ def main():
 
     processed = sum(city_day_status.values())
     ok = city_day_status.get("ok", 0)
-    print(f"\nCity-days processed: {processed:,} ({len(CITY_STATIONS)} cities x {len(dates)} dates)")
+    print(f"\nCity-days processed this run: {processed:,} ({len(CITY_STATIONS)} cities x {len(dates)} new dates)")
     print(f"City-days with >=1 resolved row: {ok:,}")
     skipped = processed - ok
     print(f"City-days skipped/incomplete: {skipped:,}")
@@ -380,8 +436,34 @@ def main():
         print("Per-bucket issues (within otherwise-processed city-days):")
         for reason, n in bucket_issues.most_common():
             print(f"  {reason}: {n:,}")
-    print(f"Rows written: {len(df):,} -> {OUT_PATH}")
-    print(f"Date range covered: {dates[0]} .. {dates[-1]}")
+    print(f"New rows written this run: {len(new_df):,}  (total in file: {len(df):,}) -> {OUT_PATH}")
+    print(f"New date range covered: {dates[0]} .. {dates[-1]}")
+
+
+def main():
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--loop", action="store_true",
+        help=f"Keep running, re-checking for newly-resolved days every {RELOOP_INTERVAL_SECS}s "
+             "instead of exiting after one pass",
+    )
+    args = parser.parse_args()
+
+    if not args.loop:
+        run_once()
+        return
+
+    logger.info("Running in --loop mode, re-checking every %ds", RELOOP_INTERVAL_SECS)
+    while True:
+        try:
+            run_once()
+        except Exception as exc:
+            logger.error("Backfill pass failed: %s", exc, exc_info=True)
+        time.sleep(RELOOP_INTERVAL_SECS)
 
 
 if __name__ == "__main__":
