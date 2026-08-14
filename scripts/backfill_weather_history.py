@@ -441,8 +441,24 @@ def run_once() -> None:
 
 
 def main():
+    from logging.handlers import RotatingFileHandler
+
     load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+    # A plain basicConfig() StreamHandler goes nowhere under a hidden
+    # detached launch (Start-Process -WindowStyle Hidden, the pattern this
+    # repo's other long-running processes all use) -- there's no console to
+    # write to and no redirected file, so --loop's whole point (run
+    # unattended, keep working) would be unobservable without this.
+    log_dir = Path(__file__).resolve().parents[1] / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "backfill_weather_history.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        encoding="utf-8",
+    )
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S",
+        handlers=[file_handler, logging.StreamHandler()],
+    )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     parser = argparse.ArgumentParser(description=__doc__)
