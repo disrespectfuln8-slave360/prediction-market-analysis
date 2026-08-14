@@ -808,17 +808,38 @@ def test_reconciliation_ignores_other_bots_live_positions(tmp_path, monkeypatch)
     assert len(client.orders) == 1
 
 
-def test_check_external_balance_terminates_independent_of_the_tracked_ledger(tmp_path):
+def test_check_external_balance_terminates_when_the_tracked_ledger_also_agrees(tmp_path):
     """The tracked bankroll can drift from reality (unbooked fees, an
     untracked position); this is the independent backstop against the real
-    account balance."""
+    account balance -- a permanent stop when Apex's OWN ledger also agrees
+    the money is genuinely gone, not merely because the real balance
+    happens to be low (see the shared-account test below for that case)."""
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    memory.cash_cents = 50  # Apex's own ledger also shows it's nearly broke
     assert not memory.is_terminated()
 
     memory.check_external_balance(50)  # real balance at $0.50, below the $1 floor
 
     assert memory.is_terminated()
     assert "real exchange balance" in memory.terminated_reason
+
+
+def test_check_external_balance_halts_for_the_day_on_a_shared_account_dip(tmp_path):
+    """This exchange account is shared with other live bots (the ladder
+    arb bot -- see bot.py's _reconcile_live_positions). If the real balance
+    dips to the floor from a SIBLING bot's own spending while Apex's own
+    tracked cash is still healthy, permanently terminating Apex over a
+    loss it never took would retire a healthy bot by mistake and require a
+    human to notice and hand-edit the ledger. It halts for the day
+    (auto-recoverable, re-checked fresh every scan) instead."""
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    assert memory.cash_cents == 1000  # healthy, untouched
+
+    memory.check_external_balance(50)  # real balance at $0.50, below the $1 floor
+
+    assert not memory.is_terminated()
+    assert memory.is_halted_today()
+    assert "shared-account dip" in memory.daily_halted_reason
 
 
 def test_history_file_appearing_after_startup_is_discovered_on_next_scan(tmp_path, monkeypatch):

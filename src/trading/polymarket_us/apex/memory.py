@@ -179,14 +179,40 @@ class ApexMemory:
         tracked bankroll can drift from reality (an unbooked fee, a
         position the ledger doesn't know about) in ways that only ever
         understate risk, so this is a second, independent check against
-        the one number that can't be wrong: the account's own balance."""
+        the one number that can't be wrong: the account's own balance.
+
+        This account is shared with other live bots on this exchange (see
+        bot.py's _reconcile_live_positions) — a low real balance does not
+        always mean Apex itself lost money. A sibling bot's own spending
+        can push the shared balance to the floor while Apex's own
+        cash_cents is still healthy. Terminating permanently over another
+        bot's dip would retire a perfectly healthy bot for a loss it never
+        took, and require a human to notice and hand-edit the ledger to
+        undo it. Only a floor breach that Apex's OWN tracked cash agrees
+        with is treated as real and permanent; otherwise this halts for
+        the day, which this check re-evaluates fresh on every scan, so it
+        self-corrects the moment the shared balance recovers."""
         with self._lock:
-            if balance_cents <= TERMINATION_FLOOR_CENTS and self.terminated_reason is None:
+            if balance_cents > TERMINATION_FLOOR_CENTS or self.terminated_reason is not None:
+                return
+            if self.cash_cents <= TERMINATION_FLOOR_CENTS:
                 self.terminated_reason = (
                     f"real exchange balance ${balance_cents / 100:.2f} at or below the "
-                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor (independent check against the live account)"
+                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, and Apex's own tracked cash "
+                    f"${self.cash_cents / 100:.2f} agrees it's genuinely spent "
+                    "(independent check against the live account)"
                 )
                 logger.error("[apex] CRITICAL: TERMINATED — %s", self.terminated_reason)
+                self._save_locked()
+            elif self.daily_halted_reason is None:
+                self.daily_halted_reason = (
+                    f"real exchange balance ${balance_cents / 100:.2f} at or below the "
+                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, but Apex's own tracked cash "
+                    f"${self.cash_cents / 100:.2f} is still healthy — looks like a shared-account "
+                    "dip from another live bot, not a real loss. Halting for today rather than "
+                    "terminating; re-checked fresh every scan."
+                )
+                logger.warning("[apex] Trading halted for the rest of the day — %s", self.daily_halted_reason)
                 self._save_locked()
 
     # ── Trade lifecycle ──────────────────────────────────────────────────────
