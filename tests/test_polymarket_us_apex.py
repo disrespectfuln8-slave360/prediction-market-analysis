@@ -597,6 +597,49 @@ def test_stale_calibration_history_blocks_trading(tmp_path, monkeypatch):
     assert fake_grounding.reload_calls == 1
 
 
+def test_record_manual_close_reconciles_without_faking_a_settlement(tmp_path):
+    """Regression test for the first real incident of this kind (2026-08-13):
+    a human sold an open Apex position directly through the exchange, outside
+    the bot's own code, which has no sell/flatten logic at all. The ledger
+    must reflect the real proceeds and stop counting the trade as open --
+    but must not record a fabricated outcome_yes, since the market itself
+    never actually resolved."""
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    trade_id = memory.record_open(
+        market_slug=SLUG, side="yes", count=0.3, price_cents=8, cost_cents=2,
+        model_prob=0.19, market_implied_prob=0.08, edge_pct=0.11, kelly_fraction_used=0.03,
+    )
+
+    pnl = memory.record_manual_close(trade_id, proceeds_cents=2)
+
+    assert pnl == 0
+    assert memory.open_trades() == []
+    closed = memory.trade_log[-1]
+    assert closed["status"] == "closed_manually"
+    assert closed["proceeds_cents"] == 2
+    assert "outcome_yes" not in closed
+    assert memory.cash_cents == 1000  # 2 spent, 2 recovered -- back to even
+    assert memory.committed_cents == 0
+
+
+def test_record_manual_close_can_still_trip_the_termination_floor(tmp_path):
+    """The same circuit breaker record_settlement() checks must fire here
+    too -- a manual close changes the bankroll exactly like a real
+    settlement does, and a human selling at a real loss is not a safer
+    event than the market resolving against the bot."""
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    memory.cash_cents = 105  # $1.05, just above the $1.00 floor
+    trade_id = memory.record_open(
+        market_slug=SLUG, side="yes", count=5.0, price_cents=10, cost_cents=50,
+        model_prob=0.3, market_implied_prob=0.1, edge_pct=0.2, kelly_fraction_used=0.05,
+    )
+
+    memory.record_manual_close(trade_id, proceeds_cents=0)  # sold for nothing
+
+    assert memory.is_terminated()
+    assert "manual close" in memory.terminated_reason
+
+
 def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(

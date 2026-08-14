@@ -280,24 +280,59 @@ class ApexMemory:
             trade["payout_cents"] = payout_cents
             trade["pnl_cents"] = pnl_cents
 
-            bankroll = self.bankroll_cents
-            if bankroll <= TERMINATION_FLOOR_CENTS and self.terminated_reason is None:
-                self.terminated_reason = (
-                    f"bankroll ${bankroll / 100:.2f} at or below the "
-                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor as of settlement of {trade['market_slug']}"
-                )
-                logger.error("[apex] CRITICAL: TERMINATED — %s", self.terminated_reason)
-
-            drawdown = self.daily_drawdown_fraction()
-            if drawdown > DAILY_DRAWDOWN_HALT_FRACTION and self.daily_halted_reason is None:
-                self.daily_halted_reason = (
-                    f"daily drawdown {drawdown * 100:.1f}% exceeds the "
-                    f"{DAILY_DRAWDOWN_HALT_FRACTION * 100:.0f}% circuit breaker"
-                )
-                logger.warning("[apex] Trading halted for the rest of the day — %s", self.daily_halted_reason)
-
+            self._check_floor_and_drawdown_locked(f"settlement of {trade['market_slug']}")
             self._save_locked()
         return pnl_cents
+
+    def record_manual_close(self, trade_id: str, proceeds_cents: int) -> Optional[int]:
+        """Close out an open trade that was closed OUTSIDE the bot — a human
+        sold the position directly through the exchange's own interface.
+        Apex has no sell/flatten logic of its own; _reconcile_live_positions()
+        only ever notices this after the fact (memory still shows the trade
+        open, but the live account no longer holds it). Deliberately distinct
+        from record_settlement(): the market hasn't actually resolved, so
+        there is no real outcome_yes to record — forcing one in here would
+        misrepresent a manual liquidation as a market settlement in any
+        future win-rate read of this log. First real incident: 2026-08-13,
+        the Miami temperature bucket bought automatically at 8c, sold
+        manually at 7c about an hour later."""
+        with self._lock:
+            trade = next((t for t in self.trade_log if t["id"] == trade_id and t["status"] == "open"), None)
+            if trade is None:
+                return None
+            cost_cents = trade["cost_cents"]
+            self.committed_cents -= cost_cents
+            self.cash_cents += proceeds_cents
+            pnl_cents = proceeds_cents - cost_cents
+
+            trade["status"] = "closed_manually"
+            trade["closed_ts"] = datetime.now(timezone.utc).isoformat()
+            trade["proceeds_cents"] = proceeds_cents
+            trade["pnl_cents"] = pnl_cents
+
+            self._check_floor_and_drawdown_locked(f"manual close of {trade['market_slug']}")
+            self._save_locked()
+        return pnl_cents
+
+    def _check_floor_and_drawdown_locked(self, trigger_desc: str) -> None:
+        """Caller must hold self._lock. Shared by record_settlement() and
+        record_manual_close() — both change the bankroll and both need the
+        same two circuit breakers re-checked against the fresh total."""
+        bankroll = self.bankroll_cents
+        if bankroll <= TERMINATION_FLOOR_CENTS and self.terminated_reason is None:
+            self.terminated_reason = (
+                f"bankroll ${bankroll / 100:.2f} at or below the "
+                f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor as of {trigger_desc}"
+            )
+            logger.error("[apex] CRITICAL: TERMINATED — %s", self.terminated_reason)
+
+        drawdown = self.daily_drawdown_fraction()
+        if drawdown > DAILY_DRAWDOWN_HALT_FRACTION and self.daily_halted_reason is None:
+            self.daily_halted_reason = (
+                f"daily drawdown {drawdown * 100:.1f}% exceeds the "
+                f"{DAILY_DRAWDOWN_HALT_FRACTION * 100:.0f}% circuit breaker"
+            )
+            logger.warning("[apex] Trading halted for the rest of the day — %s", self.daily_halted_reason)
 
     # ── Lessons / session recall ────────────────────────────────────────────
 
