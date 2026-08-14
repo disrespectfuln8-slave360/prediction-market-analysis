@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from src.trading.polymarket_us.bot import MIN_BALANCE_CENTS, LadderArbBot
+from src.trading.polymarket_us.bot import MIN_BALANCE_CENTS, SPORTS_PROP_DEPTH_MARGIN, LadderArbBot
 from src.trading.polymarket_us.models import Market, Order, Position
 from src.trading.polymarket_us.strategy import (
     MAX_SPREAD_CENTS,
@@ -469,6 +469,44 @@ def test_order_is_capped_to_book_depth():
     for order in client.orders:
         slug, count = order[0], order[2]
         assert count <= 3, f"{slug} ordered {count} against a 3-deep book"
+
+
+def test_sports_prop_pairs_require_a_depth_margin():
+    """Regression test: every CRITICAL halt to date (2026-08-04 through
+    2026-08-13) was on an astatc-* pair where a depth snapshot showing
+    exactly enough size let a real fill through, then had nothing left for
+    the hedge or flatten a moment later. A book at 4-deep should only size
+    an astatc-* lock to floor(4 / SPORTS_PROP_DEPTH_MARGIN) contracts, not
+    the full 4 an identical non-sports book would get."""
+    sports = [
+        make_market("astatc-mlb-nyy-bos-gte1", yes_bid=38, yes_ask=40, ask_depth=4, bid_depth=50),
+        make_market("astatc-mlb-nyy-bos-gte2", yes_bid=50, yes_ask=52, bid_depth=4, ask_depth=50),
+    ]
+    client = FakeClient(sports, fills={"astatc-mlb-nyy-bos-gte1": 99, "astatc-mlb-nyy-bos-gte2": 99},
+                         report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(sports, set(), budget_cents=500)[0]
+    assert lock.count > 4 // SPORTS_PROP_DEPTH_MARGIN, "budget alone would have sized past the margin"
+
+    bot._place_lock(lock, budget_cents=500)
+    for order in client.orders:
+        slug, count = order[0], order[2]
+        assert count <= 4 // SPORTS_PROP_DEPTH_MARGIN, f"{slug} ordered {count} past the sports depth margin"
+
+
+def test_non_sports_pairs_are_unaffected_by_the_sports_depth_margin():
+    """Same 4-deep book, non-astatc slugs -- the margin must not apply
+    outside the category it was built for (see test_sports_prop_pairs_...)."""
+    non_sports = [
+        make_market("p-gte1", yes_bid=38, yes_ask=40, ask_depth=4, bid_depth=50),
+        make_market("p-gte2", yes_bid=50, yes_ask=52, bid_depth=4, ask_depth=50),
+    ]
+    client = FakeClient(non_sports, fills={"p-gte1": 99, "p-gte2": 99}, report_status="unknown")
+    bot = make_bot(client)
+    lock = find_ladder_locks(non_sports, set(), budget_cents=500)[0]
+
+    bot._place_lock(lock, budget_cents=500)
+    assert any(order[2] == 4 for order in client.orders), "non-sports book should size up to the full depth"
 
 
 def test_unknown_depth_falls_back_to_one_contract():

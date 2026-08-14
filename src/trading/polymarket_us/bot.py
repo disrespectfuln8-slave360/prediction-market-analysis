@@ -50,6 +50,22 @@ below wrapped it in int(), truncating 0.3 to 0, logging "did not fill", and
 walking away from a real, unhedged, now-untracked 0.3-contract position.
 It lost its full stake at settlement a few hours later. Fill sizes here are
 floats end to end for exactly this reason; do not cast one to int.
+
+Every CRITICAL halt this bot has hit (2026-08-04 through 2026-08-13, five
+total) was on an `astatc-*` pair — live sports player-props (MLB, NFL) —
+even though those markets fail hedge attempts less often in absolute terms
+than several other categories (a House-seat-count ladder and two long-dated
+futures markets each failed more total hedge attempts over the same window
+without ever stranding a position). The difference: those other categories'
+failures were all tiny leftover stubs (~0.01 contracts) that flatten at
+basically any price. The astatc-* halts involved real, close-to-full-size
+fills (1-2 contracts) where the book had just enough visible depth to let
+the YES leg through, then had none left moments later for the hedge or the
+flatten. In-progress sports markets can reprice within the same second as
+live game action; a depth snapshot read once by _requote() is not still
+true by the time a second order needs the same liquidity. Rule 7: astatc-*
+pairs require the book to show depth well past what's actually being
+bought before trading at all — see SPORTS_PROP_DEPTH_MARGIN.
 """
 from __future__ import annotations
 
@@ -99,6 +115,19 @@ MAX_CONSECUTIVE_HEDGE_FAILURES = 3
 # depth from /bbo, so this only applies if that field ever goes missing —
 # in which case one contract is the most that can be lost to a failed hedge.
 UNKNOWN_DEPTH_CONTRACTS = 1
+
+# Slug prefix for live sports player-prop markets (see module docstring's
+# Rule 7). Confirmed the sole prefix behind every CRITICAL halt to date.
+SPORTS_PROP_PREFIX = "astatc-"
+
+# For astatc-* pairs, require the smaller side's book depth to be at least
+# this many times the size actually being traded before sizing a lock at
+# all. A depth reading of exactly "enough" is what let every stranded
+# position through — the book had precisely the size being bought and none
+# to spare once the hedge or flatten needed it a second later. Requiring a
+# multiple, not just a floor, means a book already trading at the edge of
+# what it can absorb gets skipped rather than sized down to fit.
+SPORTS_PROP_DEPTH_MARGIN = 2
 
 # Position readback moves in fractional contracts (see module docstring).
 # Anything at or below this is "didn't move" noise, not a real fill.
@@ -223,6 +252,10 @@ class LadderArbBot:
                          lock.buy_slug, max_contracts)
         else:
             max_contracts = min(depths)
+            if lock.buy_slug.startswith(SPORTS_PROP_PREFIX) or lock.sell_slug.startswith(SPORTS_PROP_PREFIX):
+                # See module docstring, Rule 7 — a snapshot showing exactly
+                # enough depth is not enough for a live sports book.
+                max_contracts //= SPORTS_PROP_DEPTH_MARGIN
         if max_contracts <= 0:
             logger.info("No book depth on %s / %s — skipping",
                         lock.buy_slug, lock.sell_slug)
