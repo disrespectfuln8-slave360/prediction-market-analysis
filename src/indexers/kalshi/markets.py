@@ -39,7 +39,8 @@ class KalshiMarketsIndexer(Indexer):
             if cursor:
                 print(f"Resuming from cursor: {cursor[:20]}...")
 
-        total = 0
+        total_fetched = 0
+        total_stored = 0
         for markets, next_cursor in client.iter_markets(
             limit=1000,
             cursor=cursor,
@@ -47,9 +48,11 @@ class KalshiMarketsIndexer(Indexer):
             max_close_ts=self._max_close_ts,
         ):
             if markets:
-                total_stored = storage.append_markets(markets)
-                total += len(markets)
-                print(f"Fetched {len(markets)} markets (total: {total}, stored: {total_stored})")
+                stored_this_batch = storage.append_markets(markets)
+                total_fetched += len(markets)
+                total_stored += stored_this_batch
+                print(f"Fetched {len(markets)} markets (total fetched: {total_fetched}, "
+                      f"total newly stored: {total_stored})")
 
             if next_cursor:
                 CURSOR_FILE.write_text(next_cursor)
@@ -58,4 +61,4 @@ class KalshiMarketsIndexer(Indexer):
                     CURSOR_FILE.unlink()
                 break
 
-        print(f"\nBackfill complete: {total} markets fetched")
+        print(f"\nBackfill complete: {total_fetched} markets fetched, {total_stored} newly stored")

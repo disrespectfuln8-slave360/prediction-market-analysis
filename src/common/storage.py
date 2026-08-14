@@ -36,7 +36,12 @@ class ParquetStorage:
         return self._existing_tickers
 
     def append_markets(self, markets: list, dedupe: bool = True) -> int:
-        """Append market records.
+        """Append market records. Returns the number of records actually
+        written by THIS call (post-dedup) — not a running total. A caller
+        printing this as per-batch progress alongside a cumulative counter
+        (see KalshiMarketsIndexer.run()) needs the two to mean different
+        things, or the log becomes unreadable the moment the two diverge
+        (a multi-million-ticker dataset makes that immediate, not eventual).
 
         dedupe=True (default): permanent per-ticker dedup — once a ticker has
         been written, it's skipped forever. Correct for a one-shot historical
@@ -64,7 +69,7 @@ class ParquetStorage:
                 existing.add(market.ticker)
 
         if not records:
-            return len(existing) if existing is not None else 0
+            return 0
 
         new_df = pd.DataFrame(records)
         chunks = self._get_market_chunks()
@@ -72,7 +77,7 @@ class ParquetStorage:
         if not chunks:
             chunk_path = self._chunk_path(0, self.CHUNK_SIZE)
             new_df.to_parquet(chunk_path)
-            return len(existing) if existing is not None else len(records)
+            return len(records)
 
         last_chunk = chunks[-1]
         last_df = pd.read_parquet(last_chunk)
@@ -89,4 +94,4 @@ class ParquetStorage:
             new_chunk_path = self._chunk_path(new_start, new_start + self.CHUNK_SIZE)
             remaining.to_parquet(new_chunk_path)
 
-        return len(existing) if existing is not None else len(records)
+        return len(records)
