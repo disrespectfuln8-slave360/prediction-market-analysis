@@ -202,6 +202,32 @@ def test_paper_ledger_charges_fees(tmp_path):
     assert client.get_balance() == 10_000 - 5 * 40 - fee
 
 
+def test_paper_ledger_accepts_a_fractional_contract_count(tmp_path):
+    """Regression: Kelly-sized bots (Apex, sports-props) size count as
+    stake_cents / price_cents and deliberately never int() it, but
+    _fee_cents_exact used to do `Decimal * count` with that raw float and
+    crash with `unsupported operand type(s) for *: 'decimal.Decimal' and
+    'float'` -- caught live 2026-08-15 when the sports-props bot's first
+    paper-mode order hit this exact path and silently rejected every
+    single trade it tried to place.
+    """
+    from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
+    class _StubReal:
+        def close(self):
+            pass
+
+    client = PaperPolymarketUSTradingClient(
+        real_client=_StubReal(), ledger_path=tmp_path / "ledger.json",
+        starting_balance_cents=10_000,
+    )
+    order = client.place_order(market_slug="m", side="yes", count=1.25, yes_price=40)
+    assert order.status == "filled"
+    fee = taker_fee_cents(40, 1.25)
+    assert fee > 0
+    assert client.get_balance() == 10_000 - round(40 * 1.25) - fee
+
+
 def test_by_date_correct_ordering_is_not_traded():
     markets = [
         make_market("prdc-gtavi-11-19-2026", yes_bid=80, yes_ask=82),

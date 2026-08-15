@@ -172,7 +172,11 @@ class PaperPolymarketUSTradingClient:
         # this account). A fee-free paper ledger books every thin-edge lock as
         # a winner that live trading would turn into a loser.
         fee = taker_fee_cents(price_paid, count)
-        cost = price_paid * count + fee
+        # count can be a fractional contract count (Kelly-sized bots never
+        # int() their fill count) -- round only the principal to a whole
+        # cent so the cash ledger never drifts into fractional cents; fee
+        # is already a rounded int from taker_fee_cents.
+        cost = round(price_paid * count) + fee
 
         with self._lock:
             if cost > self._cash_cents:
