@@ -67,10 +67,16 @@ from src.trading.polymarket.trading_client import PolymarketTradingClient
 MAX_EVENT_EXPOSURE_CENTS = 1500
 
 
-def make_kalshi_client() -> KalshiTradingClient:
-    """Real client in live mode; paper-simulated wrapper otherwise (default)."""
+def make_kalshi_client(platform: str = "KALSHI") -> KalshiTradingClient:
+    """Real client in live mode; paper-simulated wrapper otherwise (default).
+
+    `platform` selects which *_PAPER_TRADING flag gates this instance. Crypto
+    stayed in paper mode (real backtest showed it losing money on noise --
+    2026-08-15) while macro/mlb_totals went live on their own separate flag,
+    so they can no longer share one blanket "KALSHI" switch -- see each
+    BOTS entry's "paper_platform" below."""
     real = KalshiTradingClient()
-    if is_paper_mode("KALSHI"):
+    if is_paper_mode(platform):
         from src.trading.kalshi.paper_client import PaperKalshiTradingClient
         return PaperKalshiTradingClient(real_client=real)
     return real
@@ -133,6 +139,12 @@ MLB_TOTALS_SERIES = ["KXMLBTOTAL", "KXMLBSPREAD"]
 BOTS = [
     {
         "name": "crypto",
+        # Real backtest showed crypto losing money on noise at current
+        # settings (-$28.36, 35% win rate; break-even only appeared at a
+        # much stricter edge threshold that found zero qualifying real
+        # trades, ever). Stays on its own flag, paper by default, until it
+        # actually shows a real edge rather than market efficiency noise.
+        "paper_platform": "KALSHI",
         "series_list": CRYPTO_SERIES,
         "ticker_prefixes": CRYPTO_SERIES,
         "poll_interval": 15,                 # scan every 15s — catch fast-moving opportunities
@@ -149,6 +161,11 @@ BOTS = [
     },
     {
         "name": "macro",
+        # Live 2026-08-15, on its own flag shared with mlb_totals (not
+        # crypto's) -- this is the category that was actually diagnosed and
+        # fixed this session (the 15-31pp macro miscalibration turned out to
+        # be MLB totals/spreads pooled in here; see MLB_TOTALS_SERIES note).
+        "paper_platform": "KALSHI_MACRO_MLB_TOTALS",
         "series_list": MACRO_SERIES,
         "ticker_prefixes": MACRO_SERIES,
         "poll_interval": 30,
@@ -168,6 +185,8 @@ BOTS = [
         # above. Same baseline tuning as macro for now; not yet re-tuned
         # against its own (still-unexplained) 15-31pp miscalibration.
         "name": "mlb_totals",
+        # Live 2026-08-15, same flag as macro -- see that entry's note.
+        "paper_platform": "KALSHI_MACRO_MLB_TOTALS",
         "series_list": MLB_TOTALS_SERIES,
         "ticker_prefixes": MLB_TOTALS_SERIES,
         "poll_interval": 30,
@@ -241,7 +260,8 @@ def main():
     _instance_lock = acquire_single_instance_lock("run_all")  # noqa: F841
 
     stop_event = threading.Event()
-    log_mode_banner("run_all", "KALSHI")
+    for platform in sorted({cfg["paper_platform"] for cfg in BOTS}):
+        log_mode_banner(f"run_all-{platform.lower()}", platform)
     log_mode_banner("run_all-poly-leg", "POLYMARKET")
 
     def _shutdown(sig, frame):
@@ -254,16 +274,26 @@ def main():
     # Shared learning tracker — persists across restarts, shared by all bots.
     tracker = PerformanceTracker()
 
-    # One shared Kalshi client for every thread in this process (crypto bot,
-    # macro bot, convergence bot, arb bot). In paper mode this matters a lot:
-    # each PaperKalshiTradingClient keeps its own in-memory ledger, so giving
-    # every thread a separate instance means their balance/position writes to
-    # the same ledger file race and clobber each other. One shared instance
-    # (with its own internal lock) is the single source of truth, exactly
-    # like the real Kalshi account is for the real client. It also naturally
-    # centralizes live-mode rate-limiting across all four bots instead of
-    # each one throttling independently against the same account.
-    kalshi_client = make_kalshi_client()
+    # One shared Kalshi client per paper_platform group (not one for the
+    # whole process anymore -- crypto and macro/mlb_totals can now be in
+    # different modes at once, see BOTS above). Within a group this still
+    # matters a lot in paper mode: each PaperKalshiTradingClient keeps its
+    # own in-memory ledger at the same default path, so two separate paper
+    # instances in the same group would race and clobber each other's
+    # writes. One shared instance per group (with its own internal lock) is
+    # that group's single source of truth, and for a live group it also
+    # centralizes rate-limiting across its bots instead of each one
+    # throttling independently against the same account.
+    kalshi_clients = {
+        platform: make_kalshi_client(platform)
+        for platform in {cfg["paper_platform"] for cfg in BOTS}
+    }
+    # The arb scanner watches a disjoint series list (sports, not
+    # crypto/macro/mlb_totals) and has its own live/paper safety gate below
+    # -- deliberately kept on the plain "KALSHI" flag/client (crypto's),
+    # unchanged by the macro/mlb_totals split, since going live there is a
+    # separate decision this doesn't make on its own.
+    kalshi_client = kalshi_clients["KALSHI"]
     poly_client = make_polymarket_client()
 
     # Shared across crypto/macro/convergence: closes the race window between
@@ -300,7 +330,7 @@ def main():
     for cfg in BOTS:
         t = threading.Thread(
             target=_run_bot,
-            args=(cfg, stop_event, tracker, kalshi_client, reservation, event_tracker),
+            args=(cfg, stop_event, tracker, kalshi_clients[cfg["paper_platform"]], reservation, event_tracker),
             name=cfg["name"],
             daemon=True,
         )
@@ -367,7 +397,8 @@ def main():
     for t in threads:
         t.join()
 
-    kalshi_client.close()
+    for client in kalshi_clients.values():
+        client.close()
     poly_client.close()
     logging.getLogger("launcher").info("All stopped.")
 
