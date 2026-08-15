@@ -257,20 +257,37 @@ def test_build_calibration_table_groups_and_scores_correctly():
     # Tiny sigma makes bucket_probability effectively 0 or 1 depending on
     # whether mu falls inside the bucket -- lets the test control which
     # decile each row lands in without solving the CDF by hand.
-    rows = [{"forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+    rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
               "settlement": 1 if i < 27 else 0} for i in range(30)]
     df = pd.DataFrame(rows)
     table = _build_calibration_table(df)
-    assert table[90]["count"] == 30
-    assert table[90]["actual_rate"] == pytest.approx(90.0)
-    assert table[90]["mean_predicted"] > 99.0
+    assert table[("nychigh", 90)]["count"] == 30
+    assert table[("nychigh", 90)]["actual_rate"] == pytest.approx(90.0)
+    assert table[("nychigh", 90)]["mean_predicted"] > 99.0
+
+
+def test_build_calibration_table_scopes_each_city_independently():
+    """Regression for the pooled-across-cities miscalibration found live
+    2026-08-15: the aggregate 60-70% decile measured 12.5pp off (92 real
+    samples), driven mostly by LAX and Miami -- pooling meant every city's
+    60-70% bucket was judged by that, not its own history. Same rows, same
+    decile, different cities: each city's stats must stay separate."""
+    rows = (
+        [{"city": "laxhigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+          "settlement": 1 if i < 15 else 0} for i in range(30)]  # LAX: 50% actual vs ~99% predicted -- bad
+        + [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+            "settlement": 1} for _ in range(30)]  # NYC: 100% actual vs ~99% predicted -- fine
+    )
+    table = _build_calibration_table(pd.DataFrame(rows))
+    assert table[("laxhigh", 90)]["actual_rate"] == pytest.approx(50.0)
+    assert table[("nychigh", 90)]["actual_rate"] == pytest.approx(100.0)
 
 
 def test_trustworthiness_requires_the_sample_floor(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
-        engine._calibration = {90: {"count": MIN_SAMPLE_FLOOR - 1, "actual_rate": 90.0, "mean_predicted": 91.0}}
-        trustworthy, _note, count = engine._trustworthiness(0.95)
+        engine._calibration = {("nychigh", 90): {"count": MIN_SAMPLE_FLOOR - 1, "actual_rate": 90.0, "mean_predicted": 91.0}}
+        trustworthy, _note, count = engine._trustworthiness("nychigh", 0.95)
         assert not trustworthy
         assert count == MIN_SAMPLE_FLOOR - 1
     finally:
@@ -281,9 +298,9 @@ def test_trustworthiness_rejects_a_measured_miscalibration(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            90: {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 60.0, "mean_predicted": 95.0},
+            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 60.0, "mean_predicted": 95.0},
         }
-        trustworthy, note, _count = engine._trustworthiness(0.95)
+        trustworthy, note, _count = engine._trustworthiness("nychigh", 0.95)
         assert not trustworthy
         assert f"{MAX_CALIBRATION_ERROR_PCT:.0f}pp" in note
     finally:
@@ -294,10 +311,29 @@ def test_trustworthiness_passes_a_well_calibrated_bucket(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            90: {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 92.0, "mean_predicted": 94.0},
+            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 92.0, "mean_predicted": 94.0},
         }
-        trustworthy, _note, _count = engine._trustworthiness(0.95)
+        trustworthy, _note, _count = engine._trustworthiness("nychigh", 0.95)
         assert trustworthy
+    finally:
+        engine.close()
+
+
+def test_trustworthiness_is_scoped_independently_per_city(tmp_path):
+    """Regression for the pooled-across-cities miscalibration found live
+    2026-08-15 (see _build_calibration_table's docstring): a bucket's
+    trustworthiness must never bleed from one city into another, the same
+    lesson as the existing per-side (YES/NO) independence test below."""
+    engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
+    try:
+        engine._calibration = {
+            ("laxhigh", 60): {"count": MIN_SAMPLE_FLOOR + 62, "actual_rate": 46.2, "mean_predicted": 62.6},  # bad
+            ("nychigh", 60): {"count": MIN_SAMPLE_FLOOR + 5, "actual_rate": 64.0, "mean_predicted": 62.5},  # fine
+        }
+        lax_trustworthy, _note, _count = engine._trustworthiness("laxhigh", 0.65)
+        nyc_trustworthy, _note, _count = engine._trustworthiness("nychigh", 0.65)
+        assert not lax_trustworthy
+        assert nyc_trustworthy
     finally:
         engine.close()
 
@@ -314,7 +350,7 @@ def test_evaluate_bucket_checks_trustworthiness_independently_per_side(tmp_path)
         # 0-10% decile is well-calibrated; 90-100% (the NO side's real bet)
         # has no samples at all.
         engine._calibration = {
-            0: {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 5.0, "mean_predicted": 5.0},
+            ("nychigh", 0): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 5.0, "mean_predicted": 5.0},
         }
         date_str = engine._local_today("nychigh")
         engine._forecast_cache[("nychigh", date_str)] = {
@@ -345,14 +381,14 @@ def test_history_freshness_gate(tmp_path):
 
 def test_reload_calibration_reads_a_real_parquet_file(tmp_path):
     history_path = tmp_path / "weather_history.parquet"
-    rows = [{"forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+    rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
               "settlement": 1, "date": "2026-08-01"} for _ in range(30)]
     pd.DataFrame(rows).to_parquet(history_path)
 
     engine = WeatherGroundingEngine(history_path=history_path)
     try:
-        assert 90 in engine._calibration
-        assert engine._calibration[90]["count"] == 30
+        assert ("nychigh", 90) in engine._calibration
+        assert engine._calibration[("nychigh", 90)]["count"] == 30
         assert engine._history_max_date == "2026-08-01"
     finally:
         engine.close()
@@ -901,7 +937,7 @@ def test_history_file_appearing_after_startup_is_discovered_on_next_scan(tmp_pat
         assert grounding._history_max_date is None  # file doesn't exist yet
 
         # The backfill "finishes" after the engine was already constructed.
-        rows = [{"forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
+        rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
                   "settlement": 1, "date": "2026-08-12"} for _ in range(30)]
         pd.DataFrame(rows).to_parquet(history_path)
 

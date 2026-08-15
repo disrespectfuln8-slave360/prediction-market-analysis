@@ -85,31 +85,45 @@ def _bucket_low_pct(prob: float) -> int:
     return int(min(np.floor(pct / 10.0) * 10.0, 90.0))
 
 
-def _build_calibration_table(history: pd.DataFrame) -> dict[int, dict]:
-    """bucket_low (0,10,...,90) -> {count, actual_rate, mean_predicted}."""
+def _build_calibration_table(history: pd.DataFrame) -> dict[tuple[str, int], dict]:
+    """(city, bucket_low) -> {count, actual_rate, mean_predicted}.
+
+    Scoped per city, not pooled across all five -- checked live 2026-08-15
+    against the real backfilled history: the pooled 60-70% decile measured
+    12.5pp off (92 samples, well above the floor), and splitting by city
+    showed why -- LAX alone was 16.4pp off (52 samples) and Miami 10.8pp off
+    (29 samples), both plausibly explained by daily-high volatility (marine
+    layer, afternoon convection) the NBM's forecast_sigma may be
+    underestimating for those two stations specifically. NYC/Chicago/SFO had
+    too few rows in that range to say anything either way. Pooling meant
+    every city's 60-70% bucket got judged by LAX and Miami's miscalibration
+    (or, just as bad, the reverse: a real problem in one city hiding behind
+    other cities' good calibration in the same aggregate). Same lesson as
+    the Kalshi MLB-totals/macro pooling bug and the sports-props
+    never-pool-categories design, just found here for the first time."""
     rows = []
     for row in history.itertuples(index=False):
         mp = bucket_probability(row.forecast_mu, row.forecast_sigma, row.low, row.high)
         if mp is None:
             continue
-        rows.append({"model_prob_pct": mp * 100.0, "settlement": int(row.settlement)})
+        rows.append({"city": row.city, "model_prob_pct": mp * 100.0, "settlement": int(row.settlement)})
     if not rows:
         return {}
     df = pd.DataFrame(rows)
     df["bucket_low"] = np.minimum(np.floor(df["model_prob_pct"] / 10.0) * 10.0, 90.0).astype(int)
-    grouped = df.groupby("bucket_low").agg(
+    grouped = df.groupby(["city", "bucket_low"]).agg(
         count=("settlement", "size"),
         wins=("settlement", "sum"),
         mean_predicted=("model_prob_pct", "mean"),
     )
     grouped["actual_rate"] = 100.0 * grouped["wins"] / grouped["count"]
     return {
-        int(bucket_low): {
+        (str(city), int(bucket_low)): {
             "count": int(r["count"]),
             "actual_rate": float(r["actual_rate"]),
             "mean_predicted": float(r["mean_predicted"]),
         }
-        for bucket_low, r in grouped.iterrows()
+        for (city, bucket_low), r in grouped.iterrows()
     }
 
 
@@ -122,7 +136,7 @@ class WeatherGroundingEngine:
         self.history_path = history_path
         self.nbm_cache_dir = nbm_cache_dir
         self._nbm_http = httpx.Client(timeout=120.0, follow_redirects=True)
-        self._calibration: dict[int, dict] = {}
+        self._calibration: dict[tuple[str, int], dict] = {}
         self._history_max_date: Optional[str] = None
         self._forecast_cache: dict[tuple, Optional[dict]] = {}  # (city, date) -> forecast dict or None
         self._lock = threading.Lock()
@@ -157,7 +171,7 @@ class WeatherGroundingEngine:
         self._calibration = _build_calibration_table(history)
         self._history_max_date = str(history["date"].max()) if not history.empty else None
         logger.info(
-            "[apex] Calibration table loaded: %d resolved rows across %d decile bucket(s), latest date %s",
+            "[apex] Calibration table loaded: %d resolved rows across %d (city, decile) bucket(s), latest date %s",
             len(history), len(self._calibration), self._history_max_date,
         )
 
@@ -170,19 +184,19 @@ class WeatherGroundingEngine:
             return True
         return age > STALE_HISTORY_DAYS
 
-    def _trustworthiness(self, model_prob: float) -> tuple[bool, str, int]:
+    def _trustworthiness(self, city: str, model_prob: float) -> tuple[bool, str, int]:
         bucket_low = _bucket_low_pct(model_prob)
-        info = self._calibration.get(bucket_low)
+        info = self._calibration.get((city, bucket_low))
         if info is None or info["count"] < MIN_SAMPLE_FLOOR:
             count = info["count"] if info else 0
-            return False, f"only {count} historical sample(s) in the {bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})", count
+            return False, f"only {count} historical {city} sample(s) in the {bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})", count
         error = abs(info["actual_rate"] - info["mean_predicted"])
         if error > MAX_CALIBRATION_ERROR_PCT:
             return False, (
-                f"model measured {error:.1f}pp off actual in the {bucket_low}-{bucket_low + 10}% range "
+                f"{city} model measured {error:.1f}pp off actual in the {bucket_low}-{bucket_low + 10}% range "
                 f"({info['count']} samples) — exceeds the {MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
             ), info["count"]
-        return True, f"calibration OK: {info['count']} samples, {error:.1f}pp measured error", info["count"]
+        return True, f"calibration OK: {info['count']} {city} samples, {error:.1f}pp measured error", info["count"]
 
     # ── Live forecast ────────────────────────────────────────────────────────
 
@@ -238,8 +252,8 @@ class WeatherGroundingEngine:
         mp = bucket_probability(forecast["forecast_mu"], forecast["forecast_sigma"], low, high)
         if mp is None:
             return None
-        trustworthy, note, count = self._trustworthiness(mp)
-        trustworthy_no, note_no, count_no = self._trustworthiness(1.0 - mp)
+        trustworthy, note, count = self._trustworthiness(city, mp)
+        trustworthy_no, note_no, count_no = self._trustworthiness(city, 1.0 - mp)
         return BucketGrounding(
             city=city, date=date_str, low=low, high=high, model_prob=mp,
             forecast_mu=forecast["forecast_mu"], forecast_sigma=forecast["forecast_sigma"],
