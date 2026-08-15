@@ -67,10 +67,16 @@ from src.trading.polymarket.trading_client import PolymarketTradingClient
 MAX_EVENT_EXPOSURE_CENTS = 1500
 
 
-def make_kalshi_client() -> KalshiTradingClient:
-    """Real client in live mode; paper-simulated wrapper otherwise (default)."""
+def make_kalshi_client(platform: str = "KALSHI") -> KalshiTradingClient:
+    """Real client in live mode; paper-simulated wrapper otherwise (default).
+
+    `platform` selects which *_PAPER_TRADING flag gates this instance. Crypto
+    stayed in paper mode (real backtest showed it losing money on noise --
+    2026-08-15) while macro/mlb_totals went live on their own separate flag,
+    so they can no longer share one blanket "KALSHI" switch -- see each
+    BOTS entry's "paper_platform" below."""
     real = KalshiTradingClient()
-    if is_paper_mode("KALSHI"):
+    if is_paper_mode(platform):
         from src.trading.kalshi.paper_client import PaperKalshiTradingClient
         return PaperKalshiTradingClient(real_client=real)
     return real
@@ -110,14 +116,35 @@ MACRO_SERIES = [
     "PRES", "CONGRESS", "SENATE", "HOUSE",           # politics
     # Note: KXMLBGAME, KXATPMATCH, KXWTAMATCH, KXUFCFIGHT are owned by the
     # arb scanner (ARB_SERIES) and must not appear here to avoid competing orders.
-    "KXMLBTOTAL", "KXMLBSPREAD",                    # MLB totals/spreads (not in ARB_SERIES)
 ]
+
+# KXMLBTOTAL/KXMLBSPREAD used to live in MACRO_SERIES above -- added there
+# only because they're "not in ARB_SERIES", never because anyone checked
+# they'd calibrate against the same win-rate table as FOMC/CPI/elections.
+# They don't: split out and checked separately (2026-08-15), the combined
+# "macro" win-rate table showed 15-31pp gaps between quoted price and real
+# outcome at several price points. Isolating each half showed why -- real
+# macro events (FED, SENATE, HOUSE, KXINX, ...) barely clear the sample
+# floor at all (1-3 price points with 30+ trades), while MLB totals/spreads
+# have plenty of raw trade volume but are badly miscalibrated on their own
+# (still 15-31pp off in isolation) -- likely correlated trades within the
+# same game being counted as independent samples, not yet confirmed. Pooling
+# them meant real macro's already-thin signal was further diluted by a
+# differently-broken sports pool, and neither category's problem was visible
+# until they were split apart.
+MLB_TOTALS_SERIES = ["KXMLBTOTAL", "KXMLBSPREAD"]
 
 # ── Bot configurations ────────────────────────────────────────────────────────
 
 BOTS = [
     {
         "name": "crypto",
+        # Real backtest showed crypto losing money on noise at current
+        # settings (-$28.36, 35% win rate; break-even only appeared at a
+        # much stricter edge threshold that found zero qualifying real
+        # trades, ever). Stays on its own flag, paper by default, until it
+        # actually shows a real edge rather than market efficiency noise.
+        "paper_platform": "KALSHI",
         "series_list": CRYPTO_SERIES,
         "ticker_prefixes": CRYPTO_SERIES,
         "poll_interval": 15,                 # scan every 15s — catch fast-moving opportunities
@@ -134,11 +161,37 @@ BOTS = [
     },
     {
         "name": "macro",
+        # Live 2026-08-15, on its own flag shared with mlb_totals (not
+        # crypto's) -- this is the category that was actually diagnosed and
+        # fixed this session (the 15-31pp macro miscalibration turned out to
+        # be MLB totals/spreads pooled in here; see MLB_TOTALS_SERIES note).
+        "paper_platform": "KALSHI_MACRO_MLB_TOTALS",
         "series_list": MACRO_SERIES,
         "ticker_prefixes": MACRO_SERIES,
         "poll_interval": 30,
         "max_open_positions": 40,
-        "balance_fraction": 0.45,
+        "balance_fraction": 0.225,
+        "min_edge_pp": 0.5,
+        "max_spend_cents": 100,               # up to $1 per trade
+        "max_spread": 15,
+        "min_historical_trades": 30,
+        "min_entry_price": 18,
+        "max_entry_price": 55,
+        "min_close_seconds": 60,
+        "max_close_seconds": 3600,           # only bet on markets closing within 1 hour
+    },
+    {
+        # Split out from "macro" 2026-08-15 -- see MLB_TOTALS_SERIES comment
+        # above. Same baseline tuning as macro for now; not yet re-tuned
+        # against its own (still-unexplained) 15-31pp miscalibration.
+        "name": "mlb_totals",
+        # Live 2026-08-15, same flag as macro -- see that entry's note.
+        "paper_platform": "KALSHI_MACRO_MLB_TOTALS",
+        "series_list": MLB_TOTALS_SERIES,
+        "ticker_prefixes": MLB_TOTALS_SERIES,
+        "poll_interval": 30,
+        "max_open_positions": 40,
+        "balance_fraction": 0.225,
         "min_edge_pp": 0.5,
         "max_spend_cents": 100,               # up to $1 per trade
         "max_spread": 15,
@@ -207,7 +260,8 @@ def main():
     _instance_lock = acquire_single_instance_lock("run_all")  # noqa: F841
 
     stop_event = threading.Event()
-    log_mode_banner("run_all", "KALSHI")
+    for platform in sorted({cfg["paper_platform"] for cfg in BOTS}):
+        log_mode_banner(f"run_all-{platform.lower()}", platform)
     log_mode_banner("run_all-poly-leg", "POLYMARKET")
 
     def _shutdown(sig, frame):
@@ -217,19 +271,29 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Shared learning tracker — persists across restarts, shared by both bots.
+    # Shared learning tracker — persists across restarts, shared by all bots.
     tracker = PerformanceTracker()
 
-    # One shared Kalshi client for every thread in this process (crypto bot,
-    # macro bot, convergence bot, arb bot). In paper mode this matters a lot:
-    # each PaperKalshiTradingClient keeps its own in-memory ledger, so giving
-    # every thread a separate instance means their balance/position writes to
-    # the same ledger file race and clobber each other. One shared instance
-    # (with its own internal lock) is the single source of truth, exactly
-    # like the real Kalshi account is for the real client. It also naturally
-    # centralizes live-mode rate-limiting across all four bots instead of
-    # each one throttling independently against the same account.
-    kalshi_client = make_kalshi_client()
+    # One shared Kalshi client per paper_platform group (not one for the
+    # whole process anymore -- crypto and macro/mlb_totals can now be in
+    # different modes at once, see BOTS above). Within a group this still
+    # matters a lot in paper mode: each PaperKalshiTradingClient keeps its
+    # own in-memory ledger at the same default path, so two separate paper
+    # instances in the same group would race and clobber each other's
+    # writes. One shared instance per group (with its own internal lock) is
+    # that group's single source of truth, and for a live group it also
+    # centralizes rate-limiting across its bots instead of each one
+    # throttling independently against the same account.
+    kalshi_clients = {
+        platform: make_kalshi_client(platform)
+        for platform in {cfg["paper_platform"] for cfg in BOTS}
+    }
+    # The arb scanner watches a disjoint series list (sports, not
+    # crypto/macro/mlb_totals) and has its own live/paper safety gate below
+    # -- deliberately kept on the plain "KALSHI" flag/client (crypto's),
+    # unchanged by the macro/mlb_totals split, since going live there is a
+    # separate decision this doesn't make on its own.
+    kalshi_client = kalshi_clients["KALSHI"]
     poly_client = make_polymarket_client()
 
     # Shared across crypto/macro/convergence: closes the race window between
@@ -238,9 +302,9 @@ def main():
     reservation = TickerReservation()
     event_tracker = EventExposureTracker(MAX_EVENT_EXPOSURE_CENTS)
 
-    # One shared indexer — keeps local trade data fresh for both bots.
-    # Only scan crypto+macro series to avoid iterating over 9M+ esports markets.
-    all_series = CRYPTO_SERIES + MACRO_SERIES
+    # One shared indexer — keeps local trade data fresh for all bots.
+    # Only scan crypto+macro+mlb_totals series to avoid iterating over 9M+ esports markets.
+    all_series = CRYPTO_SERIES + MACRO_SERIES + MLB_TOTALS_SERIES
     indexer = threading.Thread(
         target=run_indexer_loop,
         args=(stop_event, 1800, all_series),
@@ -266,7 +330,7 @@ def main():
     for cfg in BOTS:
         t = threading.Thread(
             target=_run_bot,
-            args=(cfg, stop_event, tracker, kalshi_client, reservation, event_tracker),
+            args=(cfg, stop_event, tracker, kalshi_clients[cfg["paper_platform"]], reservation, event_tracker),
             name=cfg["name"],
             daemon=True,
         )
@@ -333,7 +397,8 @@ def main():
     for t in threads:
         t.join()
 
-    kalshi_client.close()
+    for client in kalshi_clients.values():
+        client.close()
     poly_client.close()
     logging.getLogger("launcher").info("All stopped.")
 

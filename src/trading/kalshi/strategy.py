@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +11,26 @@ from typing import TYPE_CHECKING, Optional
 import duckdb
 
 from src.indexers.kalshi.models import Market
+
+# Shared cache for the global (unfiltered) win-rate fallback query, keyed by
+# (trades_dir, markets_dir) so isolated test paths never collide with the
+# real one. run_all.py runs multiple MispricingStrategy instances (crypto,
+# macro, mlb_totals, ...) as threads in one process, all pointed at the same
+# data directory -- each one independently falling back to this same
+# full-table scan is what caused a live OOM crash (2026-08-15) once the
+# underlying dataset grew past ~85M combined rows: a category with too
+# little of its own data (real macro, split out of MACRO_SERIES that same
+# day) falls back on every reload, and three threads each recomputing the
+# identical global aggregation needed more memory than the machine had free
+# at once. Caching it once per process, shared across every instance, turns
+# 3 full scans into 1 -- but only with a lock: the crash happened on cold
+# startup, when all three bot threads reload within moments of each other
+# and would otherwise all race an empty cache and run the expensive query
+# concurrently anyway. The lock makes the second and third caller wait for
+# the first's result instead of duplicating its work.
+_GLOBAL_RATES_CACHE_TTL = 300.0  # seconds
+_global_rates_cache: dict[tuple, tuple[float, dict]] = {}
+_global_rates_lock = threading.Lock()
 
 if TYPE_CHECKING:
     from src.trading.kalshi.learning import PerformanceTracker
@@ -188,6 +210,21 @@ class MispricingStrategy:
             rates[row.taker_side][int(row.price)] = row.win_rate
         return rates
 
+    def _cached_global_win_rates(self) -> dict[str, dict[int, float]]:
+        """_query_win_rates(None) result, shared across every strategy
+        instance pointed at the same data directory within this process.
+        See the module-level cache comment for why this exists and why it's
+        locked, not just memoized."""
+        key = (self.trades_dir, self.markets_dir)
+        with _global_rates_lock:
+            cached = _global_rates_cache.get(key)
+            now = time.monotonic()
+            if cached is not None and now - cached[0] < _GLOBAL_RATES_CACHE_TTL:
+                return cached[1]
+            rates = self._query_win_rates(None)
+            _global_rates_cache[key] = (now, rates)
+            return rates
+
     def _load_win_rates(self) -> dict[str, dict[int, float]]:
         if not list(self.trades_dir.glob("*.parquet")):
             return {"yes": {}, "no": {}}
@@ -201,7 +238,7 @@ class MispricingStrategy:
         for side in ("yes", "no"):
             if self.ticker_prefixes and len(rates[side]) < 5:
                 if global_rates is None:
-                    global_rates = self._query_win_rates(None)
+                    global_rates = self._cached_global_win_rates()
                 logger.info(
                     "Only %d category-specific %s win rate points — falling back to global rates",
                     len(rates[side]), side,

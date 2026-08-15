@@ -76,19 +76,46 @@ def run_indexer_loop(
     Always uses an incremental time window — never full backfill (which would
     scan 9M+ markets and run for days). Pass ticker_prefixes to restrict the
     scan to relevant series (e.g. crypto + macro) and avoid esports markets.
+
+    Refreshes the markets snapshot before every trades fetch. The trades
+    indexer discovers which tickers to scan by querying that snapshot (see
+    its own module docstring) — a stale snapshot means brand-new tickers
+    are invisible to it even while it keeps reporting a clean "done" every
+    cycle. Live incident: this snapshot was never refreshed after its
+    initial backfill (2026-06-30) and nothing ever detected it, so every
+    live trade for six weeks was priced off a win-rate table computed from
+    six-week-old market conditions.
     """
+    from src.indexers.kalshi.markets import KalshiMarketsIndexer
     from src.indexers.kalshi.trades import KalshiTradesIndexer
     first_run = True
     while True:
         try:
+            # Scoped to markets that closed at least 2h ago -- past Kalshi's
+            # normal settlement window, so every ticker captured here is
+            # already finalized. That matters because append_markets()'s
+            # per-ticker dedup is permanent: capturing a still-open ticker
+            # would freeze its unresolved status in the calibration data
+            # forever, never picking up the eventual result. The 3-day
+            # lookback deliberately overlaps every prior cycle's window --
+            # already-seen tickers are skipped for free by that same dedup,
+            # so the overlap only costs a fast no-op scan, not real refetch
+            # time, and it means one missed cycle can't create a gap.
+            logger.info("Indexer: refreshing markets snapshot...")
+            now = datetime.now(timezone.utc)
+            KalshiMarketsIndexer(
+                min_close_ts=int((now - timedelta(days=3)).timestamp()),
+                max_close_ts=int((now - timedelta(hours=2)).timestamp()),
+            ).run()
+
             logger.info("Indexer: fetching new trades...")
             if first_run:
                 # On startup use a 24-hour window to catch recent settlements.
-                min_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp())
+                min_ts = int((now - timedelta(hours=24)).timestamp())
                 first_run = False
             else:
                 # Incremental: only fetch trades from the last 2 hours.
-                min_ts = int((datetime.now(timezone.utc) - timedelta(hours=2)).timestamp())
+                min_ts = int((now - timedelta(hours=2)).timestamp())
             KalshiTradesIndexer(min_ts=min_ts, ticker_prefixes=ticker_prefixes).run()
             logger.info("Indexer: done.")
         except Exception as exc:
