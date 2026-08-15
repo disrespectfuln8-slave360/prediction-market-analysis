@@ -110,8 +110,23 @@ MACRO_SERIES = [
     "PRES", "CONGRESS", "SENATE", "HOUSE",           # politics
     # Note: KXMLBGAME, KXATPMATCH, KXWTAMATCH, KXUFCFIGHT are owned by the
     # arb scanner (ARB_SERIES) and must not appear here to avoid competing orders.
-    "KXMLBTOTAL", "KXMLBSPREAD",                    # MLB totals/spreads (not in ARB_SERIES)
 ]
+
+# KXMLBTOTAL/KXMLBSPREAD used to live in MACRO_SERIES above -- added there
+# only because they're "not in ARB_SERIES", never because anyone checked
+# they'd calibrate against the same win-rate table as FOMC/CPI/elections.
+# They don't: split out and checked separately (2026-08-15), the combined
+# "macro" win-rate table showed 15-31pp gaps between quoted price and real
+# outcome at several price points. Isolating each half showed why -- real
+# macro events (FED, SENATE, HOUSE, KXINX, ...) barely clear the sample
+# floor at all (1-3 price points with 30+ trades), while MLB totals/spreads
+# have plenty of raw trade volume but are badly miscalibrated on their own
+# (still 15-31pp off in isolation) -- likely correlated trades within the
+# same game being counted as independent samples, not yet confirmed. Pooling
+# them meant real macro's already-thin signal was further diluted by a
+# differently-broken sports pool, and neither category's problem was visible
+# until they were split apart.
+MLB_TOTALS_SERIES = ["KXMLBTOTAL", "KXMLBSPREAD"]
 
 # ── Bot configurations ────────────────────────────────────────────────────────
 
@@ -138,7 +153,26 @@ BOTS = [
         "ticker_prefixes": MACRO_SERIES,
         "poll_interval": 30,
         "max_open_positions": 40,
-        "balance_fraction": 0.45,
+        "balance_fraction": 0.225,
+        "min_edge_pp": 0.5,
+        "max_spend_cents": 100,               # up to $1 per trade
+        "max_spread": 15,
+        "min_historical_trades": 30,
+        "min_entry_price": 18,
+        "max_entry_price": 55,
+        "min_close_seconds": 60,
+        "max_close_seconds": 3600,           # only bet on markets closing within 1 hour
+    },
+    {
+        # Split out from "macro" 2026-08-15 -- see MLB_TOTALS_SERIES comment
+        # above. Same baseline tuning as macro for now; not yet re-tuned
+        # against its own (still-unexplained) 15-31pp miscalibration.
+        "name": "mlb_totals",
+        "series_list": MLB_TOTALS_SERIES,
+        "ticker_prefixes": MLB_TOTALS_SERIES,
+        "poll_interval": 30,
+        "max_open_positions": 40,
+        "balance_fraction": 0.225,
         "min_edge_pp": 0.5,
         "max_spend_cents": 100,               # up to $1 per trade
         "max_spread": 15,
@@ -217,7 +251,7 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Shared learning tracker — persists across restarts, shared by both bots.
+    # Shared learning tracker — persists across restarts, shared by all bots.
     tracker = PerformanceTracker()
 
     # One shared Kalshi client for every thread in this process (crypto bot,
@@ -238,9 +272,9 @@ def main():
     reservation = TickerReservation()
     event_tracker = EventExposureTracker(MAX_EVENT_EXPOSURE_CENTS)
 
-    # One shared indexer — keeps local trade data fresh for both bots.
-    # Only scan crypto+macro series to avoid iterating over 9M+ esports markets.
-    all_series = CRYPTO_SERIES + MACRO_SERIES
+    # One shared indexer — keeps local trade data fresh for all bots.
+    # Only scan crypto+macro+mlb_totals series to avoid iterating over 9M+ esports markets.
+    all_series = CRYPTO_SERIES + MACRO_SERIES + MLB_TOTALS_SERIES
     indexer = threading.Thread(
         target=run_indexer_loop,
         args=(stop_event, 1800, all_series),
