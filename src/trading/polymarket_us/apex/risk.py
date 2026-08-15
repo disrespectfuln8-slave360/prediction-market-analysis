@@ -18,6 +18,9 @@ rules the system prompt specifies, enforced in code:
   - Never more than MAX_POSITION_FRACTION (5%) of bankroll on one market.
   - Keep at least MIN_CASH_RESERVE_FRACTION (40%) of bankroll in cash,
     unless edge >= HIGH_EDGE_OVERRIDE_FRACTION (15%).
+  - Never place a stake below MIN_STAKE_CENTS: a technically-positive but
+    negligible size (thin depth, a near-worthless longshot price, a cash
+    reserve squeeze) isn't worth a real order's fee and ledger footprint.
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ MAX_KELLY_FRACTION = 0.25
 MAX_POSITION_FRACTION = 0.05
 MIN_CASH_RESERVE_FRACTION = 0.40
 HIGH_EDGE_OVERRIDE_FRACTION = 0.15
+MIN_STAKE_CENTS = 25
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,12 @@ def evaluate(
         return ApexDecision(
             "pass", edge, kelly_raw, kelly_used, 0, 0.0,
             "no book depth available to fill any size",
+        )
+
+    if stake_cents < MIN_STAKE_CENTS:
+        return ApexDecision(
+            "pass", edge, kelly_raw, kelly_used, 0, 0.0,
+            f"stake {stake_cents}c below the {MIN_STAKE_CENTS}c minimum viable size",
         )
 
     return ApexDecision("buy", edge, kelly_raw, kelly_used, stake_cents, count, "edge and sizing checks passed")

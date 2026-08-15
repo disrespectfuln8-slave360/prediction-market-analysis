@@ -29,7 +29,7 @@ ARB_SERIES = ["KXATPMATCH", "KXWTAMATCH", "KXMLBGAME", "KXUFCFIGHT"]
 
 def make_kalshi_client() -> KalshiTradingClient:
     real = KalshiTradingClient()
-    if is_paper_mode():
+    if is_paper_mode("KALSHI"):
         from src.trading.kalshi.paper_client import PaperKalshiTradingClient
         return PaperKalshiTradingClient(real_client=real)
     return real
@@ -37,7 +37,7 @@ def make_kalshi_client() -> KalshiTradingClient:
 
 def make_polymarket_client() -> PolymarketTradingClient:
     real = PolymarketTradingClient()
-    if is_paper_mode():
+    if is_paper_mode("POLYMARKET"):
         from src.trading.polymarket.paper_client import PaperPolymarketTradingClient
         return PaperPolymarketTradingClient(real_client=real)
     return real
@@ -45,7 +45,8 @@ def make_polymarket_client() -> PolymarketTradingClient:
 
 def main():
     stop_event = threading.Event()
-    log_mode_banner("run_arb")
+    log_mode_banner("run_arb", "KALSHI")
+    log_mode_banner("run_arb-poly-leg", "POLYMARKET")
 
     def _shutdown(sig, frame):
         logging.getLogger("launcher").info("Shutting down arb scanner...")

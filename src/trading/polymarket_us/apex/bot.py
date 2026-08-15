@@ -192,13 +192,18 @@ class ApexBot:
         best = None  # (edge, side, slug, grounding)
         for slug, low, high, market in buckets:
             grounding = self.grounding.evaluate_bucket(city, low, high)
-            if grounding is None or not grounding.calibration_trustworthy:
+            if grounding is None:
                 continue
-            if market.yes_ask is not None:
+            # YES and NO are different bets on different probabilities
+            # (model_prob vs 1 - model_prob), which can fall in different
+            # calibration deciles -- each side needs its own trustworthy
+            # check, not one flag reused for both. See BucketGrounding's
+            # calibration_trustworthy_no docstring.
+            if grounding.calibration_trustworthy and market.yes_ask is not None:
                 edge = risk.edge_fraction(grounding.model_prob, market.yes_ask)
                 if best is None or edge > best[0]:
                     best = (edge, "yes", slug, grounding)
-            if market.yes_bid is not None:
+            if grounding.calibration_trustworthy_no and market.yes_bid is not None:
                 no_price = 100 - market.yes_bid
                 edge = risk.edge_fraction(1.0 - grounding.model_prob, no_price)
                 if best is None or edge > best[0]:
@@ -293,11 +298,20 @@ class ApexBot:
         # for edge/Kelly purposes.
         fee_cents = round(filled * taker_fee_cents(cost_price_cents, 1))
         cost_cents = round(filled * cost_price_cents) + fee_cents
+        # filled is real and non-negligible by this point (checked above),
+        # but at a cheap enough price or thin enough fill this can still
+        # round to literally 0c -- recording a real position as costing
+        # nothing corrupts cost-basis math downstream and hides real spend
+        # from the scan loop's cash_cents bookkeeping. A real fill must
+        # never be booked as free.
+        if cost_cents <= 0:
+            cost_cents = 1
+        calibration_note = grounding.calibration_note if side == "yes" else grounding.calibration_note_no
         rationale = llm.generate_rationale({
             "action": "buy", "market_slug": slug, "city": grounding.city,
             "low": grounding.low, "high": grounding.high,
             "model_prob": model_prob_for_side, "market_implied_prob": market_implied,
-            "edge_pct": decision.edge_fraction, "calibration_note": grounding.calibration_note,
+            "edge_pct": decision.edge_fraction, "calibration_note": calibration_note,
             "stake_cents": cost_cents, "count": filled, "reason": decision.reason,
             "bankroll_cents": self.memory.bankroll_cents,
             "recent_lessons": self.memory.recent_lessons(3),
@@ -356,6 +370,15 @@ class ApexBot:
             logger.info("[apex] Halted for today -- %s. Observing only.", self.memory.daily_halted_reason)
             return
 
+        # Reload BEFORE checking staleness -- the check reads
+        # self.grounding's cached _history_max_date, which is only ever
+        # updated by reload_calibration(). Checking staleness first means
+        # a history file that didn't exist when the engine was constructed
+        # (the normal case: Apex starts before the one-off backfill script
+        # has ever been run) can never be discovered, because the early
+        # return on "stale" would permanently prevent reload_calibration()
+        # from running again.
+        self.grounding.reload_calibration()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self.grounding.history_is_stale(today):
             logger.warning(
@@ -363,7 +386,6 @@ class ApexBot:
                 "scripts/backfill_weather_history.py before trading. Observing only this scan."
             )
             return
-        self.grounding.reload_calibration()
 
         try:
             markets = self.client.list_all_markets(active=True, closed=False)

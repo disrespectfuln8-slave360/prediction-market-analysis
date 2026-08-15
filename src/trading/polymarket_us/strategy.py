@@ -66,19 +66,23 @@ THETA_TAKER = Decimal("0.06")
 THETA_MAKER = Decimal("-0.0125")
 
 
-def _fee_cents_exact(theta: Decimal, price_cents: int, count: int) -> Decimal:
+def _fee_cents_exact(theta: Decimal, price_cents: int, count: float) -> Decimal:
     p = Decimal(price_cents)
-    return theta * p * (100 - p) * count / 100
+    # count arrives as a float from any caller sizing via Kelly (stake_cents /
+    # price_cents, deliberately never int()'d -- see apex/bot.py's fill-count
+    # paranoia note). Decimal * float raises TypeError; str() first avoids
+    # that without silently truncating a fractional contract count to int.
+    return theta * p * (100 - p) * Decimal(str(count)) / 100
 
 
-def taker_fee_cents(price_cents: int, count: int) -> int:
+def taker_fee_cents(price_cents: int, count: float) -> int:
     """Commission charged to the aggressor for taking `count` contracts at
     `price_cents`. See THETA_TAKER above for the source and rounding rule."""
     exact = _fee_cents_exact(THETA_TAKER, price_cents, count)
     return int(exact.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
 
-def maker_rebate_cents(price_cents: int, count: int) -> int:
+def maker_rebate_cents(price_cents: int, count: float) -> int:
     """Rebate credited to the resting side when `count` contracts fill at
     `price_cents`. Positive = credit. See THETA_MAKER above."""
     exact = -_fee_cents_exact(THETA_MAKER, price_cents, count)
