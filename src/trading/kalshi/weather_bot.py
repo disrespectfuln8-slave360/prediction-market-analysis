@@ -288,7 +288,14 @@ class KalshiWeatherBot:
                 mid = max(1, min(99, (market.yes_bid + market.yes_ask) // 2))
                 yes_price = mid
             else:
-                no_mid = max(1, min(99, (100 - market.yes_ask + market.no_ask) // 2))
+                # Real no_bid, matching the exact formula the NO side was
+                # scored with in _best_candidate_for_bucket_group -- using a
+                # different estimate here (e.g. 100-yes_ask) would size the
+                # order off a price the edge was never actually checked
+                # against, and would crash on a book with no_bid/no_ask
+                # quoted but no yes_ask (which the NO branch's own None
+                # checks there never rule out).
+                no_mid = max(1, min(99, (market.no_bid + market.no_ask) // 2))
                 mid = no_mid
                 yes_price = 100 - no_mid
 

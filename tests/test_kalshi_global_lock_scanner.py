@@ -63,6 +63,23 @@ def test_find_locks_detects_a_real_crossed_book():
     assert locks[0].profit_cents == 3
 
 
+def test_find_locks_sizes_against_the_combined_cost_of_both_legs():
+    """Regression: count used to be sized off max(yes_ask, no_ask) alone --
+    a single leg's price -- when the real cost per contract PAIR is both
+    legs together. 48+49=97: max(48,49)=49 -> 100//49=2 contracts would
+    have cost 2*97=194c, nearly double the max_spend_cents=100 cap this was
+    supposed to respect. Sized correctly against the combined 97c cost,
+    100//97=1 contract, real cost 97c, within the cap."""
+    strategy = MispricingStrategy(min_close_seconds=60, max_close_seconds=3600, max_spend_cents=100)
+    market = make_market("KXHIGHNY-26AUG15-B85.5", yes_ask=48, no_ask=49)
+    locks = strategy.find_locks([market], held_tickers=set())
+    assert len(locks) == 1
+    count = locks[0].count
+    real_cost = count * (market.yes_ask + market.no_ask)
+    assert real_cost <= 100
+    assert count == 1
+
+
 def test_find_locks_ignores_a_normal_book():
     strategy = MispricingStrategy(min_close_seconds=60, max_close_seconds=3600)
     market = make_market("KXHIGHNY-26AUG15-B85.5", yes_ask=52, no_ask=50)  # 102 total -- no free money

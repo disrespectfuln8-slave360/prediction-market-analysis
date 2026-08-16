@@ -68,9 +68,26 @@ SCHEMA_COLUMNS = [
 ]
 
 
+# How many days before the latest already-captured date to re-check on every
+# run. Kalshi's ~20 weather series don't all settle at the same moment
+# (different local close times per city), so a run that lands mid-way
+# through a date's settlements would, with a naive "resume from max+1"
+# cutoff, permanently skip whichever cities settled after that run finished
+# -- confirmed this could actually happen: the very first backfill's cutoff
+# date (2026-08-13) landed on a day where the newer settlement source
+# (Weather Company, switched 2026-08-14) hadn't posted ANY of the next
+# day's results yet. That specific case cost nothing (zero rows recorded
+# for the skipped date, so nothing to lose), but a PARTIAL date -- some
+# cities in, some still pending -- would have silently lost the rest
+# forever under a strict max+1 resume. Re-checking a few days back and
+# relying on the ticker-level dedup below (rather than the date-level
+# _resume_start_date alone) closes that gap.
+RECHECK_DAYS = 3
+
+
 def _resume_start_date() -> str:
-    """Day after the latest date already in weather_history.parquet, or
-    START_DATE if that file doesn't exist yet."""
+    """A few days before the latest date already in weather_history.parquet
+    (see RECHECK_DAYS), or START_DATE if that file doesn't exist yet."""
     if not OUT_PATH.exists():
         return START_DATE
     try:
@@ -80,8 +97,8 @@ def _resume_start_date() -> str:
         return START_DATE
     if pd.isna(existing_max):
         return START_DATE
-    next_day = datetime.strptime(str(existing_max), "%Y-%m-%d").date() + timedelta(days=1)
-    return next_day.strftime("%Y-%m-%d")
+    recheck_from = datetime.strptime(str(existing_max), "%Y-%m-%d").date() - timedelta(days=RECHECK_DAYS - 1)
+    return max(recheck_from, datetime.strptime(START_DATE, "%Y-%m-%d").date()).strftime("%Y-%m-%d")
 
 
 def _fetch_settled_rows(start_date: str, end_date_exclusive: str) -> pd.DataFrame:
@@ -108,7 +125,22 @@ def run_once() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     settled = _fetch_settled_rows(start, end_exclusive)
-    print(f"{len(settled)} newly-settled rows found ({start} .. {today})")
+    print(f"{len(settled)} settled rows found in the {start} .. {today} recheck window")
+    if settled.empty:
+        return
+
+    # The recheck window (see RECHECK_DAYS) deliberately overlaps rows this
+    # file may already have from a prior run -- drop anything already
+    # recorded by ticker (the real dedup key) rather than by date, since a
+    # date's earlier partial capture must still get topped up.
+    already_recorded: set = set()
+    if OUT_PATH.exists():
+        try:
+            already_recorded = set(pd.read_parquet(OUT_PATH, columns=["ticker"])["ticker"])
+        except Exception as exc:
+            logger.warning("Could not read existing tickers from %s (%s) — proceeding without dedup", OUT_PATH, exc)
+    settled = settled[~settled["ticker"].isin(already_recorded)]
+    print(f"{len(settled)} of those are newly-settled (not already recorded)")
     if settled.empty:
         return
 
@@ -154,9 +186,9 @@ def run_once() -> None:
         return
 
     new_df = pd.DataFrame(rows, columns=SCHEMA_COLUMNS)
-    # Append rather than rebuild -- _resume_start_date() already guarantees
-    # `settled` doesn't overlap what's in OUT_PATH, so this can't introduce
-    # duplicate rows.
+    # Append rather than rebuild -- the ticker-level dedup above already
+    # ensures `rows` excludes anything already in OUT_PATH, even though the
+    # recheck window (RECHECK_DAYS) means `settled` itself can overlap.
     if OUT_PATH.exists():
         df = pd.concat([pd.read_parquet(OUT_PATH), new_df], ignore_index=True)
     else:

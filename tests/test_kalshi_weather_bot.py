@@ -19,9 +19,18 @@ from src.trading.kalshi.weather_bot import MAX_SPEND_CENTS, KalshiWeatherBot
 from src.trading.kalshi.weather_model import KalshiWeatherGroundingEngine
 
 
-def make_market(ticker, title, yes_bid, yes_ask, close_time=None):
-    no_bid = (100 - yes_ask) if yes_ask is not None else None
-    no_ask = (100 - yes_bid) if yes_bid is not None else None
+def make_market(ticker, title, yes_bid, yes_ask, no_bid=None, no_ask=None, close_time=None):
+    # Kalshi's no_bid/no_ask are independent real quotes fetched from the
+    # API, NOT derived from yes_bid/yes_ask the way polymarket_us's are
+    # (confirmed live 2026-08-15) -- defaulting to the complementary values
+    # here is only a test convenience, and callers exercising the NO side
+    # for real must pass genuinely independent values, or this helper would
+    # hide the exact class of bug (a formula assuming no_bid==100-yes_ask)
+    # already found and fixed in weather_bot.py.
+    if no_bid is None:
+        no_bid = (100 - yes_ask) if yes_ask is not None else None
+    if no_ask is None:
+        no_ask = (100 - yes_bid) if yes_bid is not None else None
     return Market(
         ticker=ticker, event_ticker=ticker.rsplit("-", 1)[0], market_type="binary",
         title=title, yes_sub_title="", no_sub_title="", status="open",
@@ -111,6 +120,31 @@ def test_scan_buys_yes_when_calibration_shows_a_trustworthy_edge(tmp_path):
     ticker, side, count, yes_price = client.orders[0]
     assert (ticker, side) == (TICKER, "yes")
     assert yes_price == (38 + 40) // 2
+
+
+def test_scan_buys_no_using_the_real_no_bid_even_with_no_yes_side_quote(tmp_path):
+    """Regression: the NO-side execution path used to price the order off
+    100-yes_ask instead of the real market.no_bid it was scored with in
+    _best_candidate_for_bucket_group -- inconsistent with itself, and would
+    crash outright on a book like this one (no_bid/no_ask quoted, yes_ask
+    genuinely absent), since calibration_trustworthy_no's own None-checks
+    never require yes_ask to be present at all."""
+    market = make_market(TICKER, TITLE, yes_bid=None, yes_ask=None, no_bid=58, no_ask=62)
+    grounding = make_grounding_engine(
+        tmp_path,
+        # mu far below the bucket -> model_prob(YES) ~0 -> 1-model_prob ~1.0 -> decile 90
+        forecasts={("KXHIGHNY", "2026-08-15"): {"forecast_mu": 50.0, "forecast_sigma": 0.01, "forecast_cycle": "c", "lead_hours": 15}},
+        calibration={("KXHIGHNY", 90): {"count": 40, "actual_rate": 92.0, "mean_predicted": 99.0}},
+    )
+    client = FakeClient([market], fills={TICKER: 99})
+    bot = make_bot(client, grounding, tmp_path)
+
+    bot._scan_once()  # must not raise
+
+    assert len(client.orders) == 1
+    ticker, side, count, yes_price = client.orders[0]
+    assert (ticker, side) == (TICKER, "no")
+    assert yes_price == 100 - ((58 + 62) // 2)  # priced off the real no_bid/no_ask midpoint
 
 
 def test_scan_passes_when_calibration_is_untrustworthy(tmp_path):

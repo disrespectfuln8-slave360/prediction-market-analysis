@@ -472,7 +472,14 @@ class MispricingStrategy:
                 continue
             total = market.yes_ask + market.no_ask
             if total < 100:  # guaranteed ≥1¢ profit per contract pair
-                count = self._contracts_for_spend(max(market.yes_ask, market.no_ask))
+                # Cost per contract PAIR is both legs together (total), not
+                # just one leg -- sizing off max(yes_ask, no_ask) alone let
+                # a lock spend up to ~2x max_spend_cents (e.g. 48+49=97:
+                # max(48,49)=49 -> 100//49=2 contracts -> real cost 2*97=194c,
+                # not the intended <=100c). polymarket_us's own _size_lock
+                # already gets this right (buy_price + (100-sell_price));
+                # this was the one place on this platform that didn't.
+                count = self._contracts_for_spend(total)
                 if count > 0:
                     locks.append(Lock(
                         market=market,
