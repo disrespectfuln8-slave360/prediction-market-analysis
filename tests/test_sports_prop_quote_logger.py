@@ -68,11 +68,13 @@ class FakeClient:
         self._bbo = bbo or {}
         self._settlements = settlements or {}
         self._settlement_errors = set(settlement_errors)
+        self.bbo_calls = 0
 
     def list_all_markets(self, active=True, closed=False):
         return self._markets
 
     def get_bbo(self, slug):
+        self.bbo_calls += 1
         return self._bbo.get(slug, {"marketData": {}})
 
     def get_settlement(self, slug):
@@ -114,6 +116,70 @@ def test_quotes_are_logged_with_parsed_metadata(tmp_path, monkeypatch):
     assert rows[0]["stat"] == "outs"
     assert rows[0]["bid"] == 15
     assert rows[0]["ask"] == 18
+
+
+def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatch):
+    """Regression: _build_calibration_table only ever reads each slug's
+    FIRST recorded ask and FIRST recorded bid -- every quote after that was
+    logged but never used for anything. Left unbounded this grew to
+    60MB/228k lines in one day (confirmed live 2026-08-15), and re-parsing
+    that on every calibration reload was the single largest memory consumer
+    on the machine. Once a slug has both, it must stop being fetched
+    entirely, not just stop being written."""
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient(
+        [make_market(SLUG)],
+        bbo={SLUG: {"marketData": {
+            "bestBid": {"value": "0.15"}, "bestAsk": {"value": "0.18"},
+            "bidDepth": 5, "askDepth": 8,
+        }}},
+    )
+    logger_ = SportsPropQuoteLogger(client)
+    logger_._active = {SLUG: parse_prop_slug(SLUG)}
+
+    logger_._log_quotes()
+    assert client.bbo_calls == 1
+    assert SLUG in logger_._have_ask and SLUG in logger_._have_bid
+
+    logger_._log_quotes()  # second cycle, same active bucket
+    assert client.bbo_calls == 1  # never fetched again
+
+
+def test_a_slug_with_only_one_side_known_keeps_being_checked(tmp_path, monkeypatch):
+    """A one-sided book (bid known, ask still None) must keep polling until
+    the missing side actually shows up -- only fully-captured slugs stop."""
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient(
+        [make_market(SLUG)],
+        bbo={SLUG: {"marketData": {
+            "bestBid": {"value": "0.15"}, "bestAsk": None, "bidDepth": 5, "askDepth": 0,
+        }}},
+    )
+    logger_ = SportsPropQuoteLogger(client)
+    logger_._active = {SLUG: parse_prop_slug(SLUG)}
+
+    logger_._log_quotes()
+    assert client.bbo_calls == 1
+    assert SLUG in logger_._have_bid
+    assert SLUG not in logger_._have_ask
+
+    logger_._log_quotes()
+    assert client.bbo_calls == 2  # still polled -- ask side still unknown
+
+
+def test_capture_state_is_seeded_from_disk_on_startup(tmp_path, monkeypatch):
+    """A restart must not forget which slugs are already fully captured and
+    start re-logging them -- the exact regrowth this whole fix prevents."""
+    monkeypatch.chdir(tmp_path)
+    from src.trading.polymarket_us.sports_prop_quote_logger import QUOTES_PATH
+    QUOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    QUOTES_PATH.write_text(json.dumps({"slug": SLUG, "bid": 15, "ask": 18}) + "\n")
+
+    client = FakeClient([make_market(SLUG)])
+    logger_ = SportsPropQuoteLogger(client)
+
+    assert SLUG in logger_._have_ask
+    assert SLUG in logger_._have_bid
 
 
 def test_bucket_disappearing_moves_to_pending_settlement(tmp_path, monkeypatch):

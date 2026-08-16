@@ -92,6 +92,44 @@ class SportsPropQuoteLogger:
         self.client = client  # PolymarketUSTradingClient (market data only)
         self._active: dict[str, dict] = {}  # slug -> parsed metadata
         self._pending_settlement: dict[str, tuple[dict, int]] = {}  # slug -> (metadata, cycles waited)
+        # sports_prop_calibration.py's _build_calibration_table only ever
+        # reads each slug's FIRST recorded ask and FIRST recorded bid --
+        # every quote after that is logged but never used for anything.
+        # Left unbounded, this grew to 60MB/228k lines in one day (confirmed
+        # live 2026-08-15) and re-parsing that on every calibration reload
+        # (every ~5 min) was the single largest memory consumer on the whole
+        # machine. Stop fetching/logging a slug at all once both are known.
+        self._have_ask: set[str] = set()
+        self._have_bid: set[str] = set()
+        self._load_captured_state()
+
+    def _load_captured_state(self) -> None:
+        """Seed _have_ask/_have_bid from whatever's already on disk, so a
+        restart (crash, redeploy) doesn't forget which slugs are already
+        fully captured and start re-logging them -- the exact regrowth this
+        whole change exists to prevent."""
+        if not QUOTES_PATH.exists():
+            return
+        with QUOTES_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                slug = row.get("slug")
+                if slug is None:
+                    continue
+                if row.get("ask") is not None:
+                    self._have_ask.add(slug)
+                if row.get("bid") is not None:
+                    self._have_bid.add(slug)
+        logger.info(
+            "Seeded capture state from disk: %d slugs with a known ask, %d with a known bid",
+            len(self._have_ask), len(self._have_bid),
+        )
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
@@ -132,7 +170,11 @@ class SportsPropQuoteLogger:
     def _log_quotes(self) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
         logged = 0
-        for slug, meta in self._active.items():
+        pending = {
+            slug: meta for slug, meta in self._active.items()
+            if slug not in self._have_ask or slug not in self._have_bid
+        }
+        for slug, meta in pending.items():
             try:
                 md = self.client.get_bbo(slug).get("marketData", {})
             except Exception as exc:
@@ -143,13 +185,21 @@ class SportsPropQuoteLogger:
                 v = (data.get(key) or {}).get("value")
                 return None if v is None else round(float(v) * 100)
 
+            bid, ask = cents("bestBid"), cents("bestAsk")
             self._append(QUOTES_PATH, {
                 "ts": now_iso, "slug": slug, **meta,
-                "bid": cents("bestBid"), "ask": cents("bestAsk"),
+                "bid": bid, "ask": ask,
                 "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
             })
             logged += 1
-        logger.info("Logged quotes for %d/%d active buckets", logged, len(self._active))
+            if ask is not None:
+                self._have_ask.add(slug)
+            if bid is not None:
+                self._have_bid.add(slug)
+        logger.info(
+            "Logged quotes for %d/%d active buckets needing them (%d already fully captured)",
+            logged, len(pending), len(self._active) - len(pending),
+        )
 
     def _check_settlements(self) -> None:
         if not self._pending_settlement:
