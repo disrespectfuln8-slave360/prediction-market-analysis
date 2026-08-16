@@ -54,6 +54,7 @@ from src.trading.kalshi.convergence_bot import ConvergenceBot
 from src.trading.kalshi.learning import PerformanceTracker
 from src.trading.kalshi.strategy import MispricingStrategy
 from src.trading.kalshi.trading_client import KalshiTradingClient
+from src.trading.kalshi.weather_model import CITY_STATIONS as WEATHER_SERIES
 from src.trading.mode import is_paper_mode, log_mode_banner
 from src.trading.polymarket.arb_scanner import run_arb_loop
 from src.trading.polymarket.trading_client import PolymarketTradingClient
@@ -101,6 +102,20 @@ def make_polymarket_client() -> PolymarketTradingClient:
 # the same ticker.
 ARB_SERIES = ["KXATPMATCH", "KXWTAMATCH", "KXMLBGAME", "KXUFCFIGHT"]
 
+# ── Global same-market lock scan (yes_ask + no_ask < $1, guaranteed profit) ──
+# find_locks() already runs every cycle inside each of crypto/macro/mlb_totals,
+# but only against that bot's own narrow series_list -- roughly 24 series
+# total. Checked live 2026-08-15: it has NEVER once found a real lock across
+# this account's entire trading history, and a truly unbounded scan
+# (list_liquid_open_markets's own docstring: "50k+ markets, most illiquid
+# esports") would be far too expensive to poll regularly. This widens
+# coverage to every series already scanned by SOMETHING in this process
+# (crypto+macro+mlb_totals) plus the weather series nothing else watches yet
+# -- meaningfully broader without the unbounded-scan cost. Deliberately
+# excludes ARB_SERIES (the arb scanner's own exclusive territory, same
+# reasoning as MACRO_SERIES above) to avoid two threads competing for the
+# same ticker. Defined below, once CRYPTO_SERIES/MACRO_SERIES/MLB_TOTALS_SERIES exist.
+
 # ── Market universe split (must be disjoint) ──────────────────────────────────
 
 CRYPTO_SERIES = [
@@ -133,6 +148,8 @@ MACRO_SERIES = [
 # differently-broken sports pool, and neither category's problem was visible
 # until they were split apart.
 MLB_TOTALS_SERIES = ["KXMLBTOTAL", "KXMLBSPREAD"]
+
+GLOBAL_LOCK_SERIES = CRYPTO_SERIES + MACRO_SERIES + MLB_TOTALS_SERIES + list(WEATHER_SERIES)
 
 # ── Bot configurations ────────────────────────────────────────────────────────
 
@@ -365,6 +382,41 @@ def main():
     arb_thread.start()
     threads.append(arb_thread)
 
+    # Global same-market lock scanner: risk-free (yes_ask+no_ask<$1) checked
+    # across every series any bot in this process already watches, plus
+    # weather -- see GLOBAL_LOCK_SERIES above for why this exists and why
+    # it's bounded rather than unbounded. On the crypto/paper client
+    # deliberately, not the live macro/mlb_totals one -- this is new code
+    # (list_liquid_open_markets has never been called with a list this wide
+    # before), and a guaranteed-profit-by-construction check is still not a
+    # reason to skip proving new code paper-side first. Point it at
+    # kalshi_clients["KALSHI_MACRO_MLB_TOTALS"] once it's shown real, correct
+    # behavior here.
+    def _run_global_lock_scanner(stop_event):
+        log = logging.getLogger("global_locks")
+        strategy = MispricingStrategy()  # find_locks() needs no win-rate/prefix config at all
+        placer = TradingBot(client=kalshi_client, strategy=strategy, reservation=reservation)
+        while not stop_event.is_set():
+            try:
+                markets = kalshi_client.list_liquid_open_markets(series_list=GLOBAL_LOCK_SERIES)
+                held = {p.ticker for p in kalshi_client.get_positions()} | {o.ticker for o in kalshi_client.get_open_orders()}
+                locks = strategy.find_locks(markets, held)
+                if locks:
+                    log.info("Found %d GLOBAL lock opportunity(s) across %d open markets (%d series)",
+                              len(locks), len(markets), len(GLOBAL_LOCK_SERIES))
+                    placer._place_locks(locks, held, budget_cents=500)
+                else:
+                    log.debug("Scanned %d open markets across %d series, no locks", len(markets), len(GLOBAL_LOCK_SERIES))
+            except Exception as exc:
+                log.error("Global lock scan error: %s", exc, exc_info=True)
+            stop_event.wait(timeout=45)
+
+    lock_scanner_thread = threading.Thread(
+        target=_run_global_lock_scanner, args=(stop_event,), name="global_locks", daemon=True
+    )
+    lock_scanner_thread.start()
+    threads.append(lock_scanner_thread)
+
     # Convergence bot: bets crypto brackets whose outcome is ≥93% certain
     # from live spot prices. Independent signal source from the other bots,
     # shares the same Kalshi client/ledger.
@@ -390,7 +442,7 @@ def main():
     threads.append(conv_thread)
 
     logging.getLogger("launcher").info(
-        "%d bots + 1 convergence + 1 indexer + 1 arb scanner running. Ctrl+C to stop.",
+        "%d bots + 1 convergence + 1 indexer + 1 arb scanner + 1 global lock scanner running. Ctrl+C to stop.",
         len(BOTS),
     )
 
