@@ -60,11 +60,15 @@ class FakeCalibration:
 
 
 class FakeClient:
-    def __init__(self, markets, fills=None, balance=100_000, settlements=None):
+    def __init__(self, markets, fills=None, balance=100_000, settlements=None, requote_markets=None):
         self._markets = {m.slug: m for m in markets}
         self._fills = fills or {}
         self._balance = balance
         self._settlements = settlements or {}
+        # Optional: a slug present here is what get_market() returns instead
+        # of the bulk-scan snapshot -- simulates the price having moved
+        # between _best_bucket_for_game's scan and _requote_bucket's re-fetch.
+        self._requote_markets = requote_markets or {}
         self.positions: dict[str, float] = {}
         self.orders: list[tuple] = []
 
@@ -75,7 +79,7 @@ class FakeClient:
         return [Position(market_slug=s, position=p) for s, p in self.positions.items() if p != 0]
 
     def get_market(self, slug):
-        return self._markets[slug]
+        return self._requote_markets.get(slug, self._markets[slug])
 
     def get_settlement(self, slug):
         return self._settlements.get(slug)
@@ -134,6 +138,31 @@ def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path):
     trade = memory.open_trades()[0]
     assert trade["side"] == "no"
     assert trade["price_cents"] == 30
+
+
+def test_scan_reevaluates_calibration_at_the_requoted_price_not_the_stale_scan_price(tmp_path):
+    """Regression: model_prob used to come from the grounding computed
+    against the bulk-scan price, never re-checked against the price the
+    order actually requotes to. calibration_actual_rate is scoped to a
+    10-cent decile, so a price that moved deciles between the scan and the
+    requote (thin sports-prop books move fast) would size a real trade off
+    a probability measured for a decile it isn't even buying into anymore.
+    Here the bulk scan sees yes_ask=40 (a great, trustworthy 90% decile),
+    but the price has actually moved to 70 by requote time, where there's
+    no calibration data at all -- the trade must be skipped, not placed
+    using the stale 40c grounding."""
+    scan_market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    requoted_market = make_market(SLUG, yes_bid=68, yes_ask=70)
+    grounding_at_scan_price = make_grounding("mlb", "hits", "yes", 40, actual_rate=90.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding_at_scan_price})
+    client = FakeClient([scan_market], fills={SLUG: 99}, requote_markets={SLUG: requoted_market})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert client.orders == []  # no calibration data at 70c -- must not trade on the stale 40c grounding
+    assert memory.open_trades() == []
 
 
 def test_scan_passes_when_calibration_is_untrustworthy(tmp_path):

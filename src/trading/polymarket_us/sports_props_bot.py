@@ -349,12 +349,29 @@ class SportsPropsBot:
             candidate = self._best_bucket_for_game(buckets)
             if candidate is None:
                 continue
-            _coarse_edge, side, slug, meta, grounding = candidate
+            _coarse_edge, side, slug, meta, _stale_grounding = candidate
 
             requote = self._requote_bucket(slug, side)
             if requote is None:
                 continue
             cost_price_cents, order_yes_price, depth = requote
+
+            # Re-evaluate at the fresh requoted price, not the bulk-scan
+            # price _best_bucket_for_game used -- calibration_actual_rate is
+            # scoped to a 10-cent decile, so a price that moved deciles
+            # between the scan and this requote would otherwise size a real
+            # trade off a probability measured for a decile it's no longer
+            # actually buying into (Apex doesn't have this exposure --
+            # model_prob there comes from the NOAA forecast, independent of
+            # price -- but this bot's model_prob IS the price's own decile
+            # rate, so staleness here is a real, not just cosmetic, gap).
+            grounding = self.calibration.evaluate(meta["sport"], meta["stat"], side, cost_price_cents)
+            if not grounding.calibration_trustworthy:
+                logger.debug(
+                    "[sports_props] PASS %s (%s side): no longer trustworthy at the requoted price (%s)",
+                    slug, side, grounding.calibration_note,
+                )
+                continue
 
             model_prob_for_side = _model_prob(grounding)
             decision = risk.evaluate(
