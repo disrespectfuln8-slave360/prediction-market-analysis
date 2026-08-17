@@ -709,6 +709,38 @@ def test_record_manual_close_can_still_trip_the_termination_floor(tmp_path):
     assert "manual close" in memory.terminated_reason
 
 
+def test_record_manual_open_reconciles_a_stray_position_without_fabricating_a_model_prob(tmp_path):
+    """Regression test for the mirror-image incident (2026-08-16): a human
+    bought a position directly through the exchange -- Apex's own
+    one-bucket-per-city-day guard made it impossible for the bot itself to
+    have placed a second Chicago bucket while already holding a third one
+    for that same day, and the exchange's own manualOrderIndicator field
+    confirmed it. _reconcile_live_positions() halts on any live position
+    with no matching ledger entry; this is how a human resolves that
+    without either leaving it untracked forever or fabricating a model_prob
+    Apex never computed."""
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    trade_id = memory.record_manual_open(
+        market_slug=SLUG, side="yes", count=2.25, price_cents=43, cost_cents=97,
+    )
+
+    assert memory.cash_cents == 903  # 1000 - 97
+    assert memory.committed_cents == 97
+    trade = memory.open_trades()[0]
+    assert trade["id"] == trade_id
+    assert trade["model_prob"] == 0.5  # neutral placeholder, not a fabricated Apex estimate
+    assert trade["manual"] is True
+    assert "not an Apex decision" in trade["rationale"]
+
+    # Must settle through the exact same path as any other trade -- the
+    # miss-lesson logic reads trade["model_prob"] unconditionally, so this
+    # also proves 0.5 doesn't crash it.
+    pnl = memory.record_settlement(trade_id, outcome_yes=True, payout_cents=225)
+    assert pnl == 225 - 97
+    assert memory.open_trades() == []
+
+
 def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(

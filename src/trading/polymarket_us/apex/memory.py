@@ -254,6 +254,55 @@ class ApexMemory:
             self._save_locked()
         return trade_id
 
+    def record_manual_open(
+        self,
+        market_slug: str,
+        side: str,
+        count: float,
+        price_cents: int,
+        cost_cents: int,
+        note: str = "",
+    ) -> str:
+        """A position opened OUTSIDE the bot — a human bought directly
+        through the exchange's own interface. Mirror image of
+        record_manual_close(): _reconcile_live_positions() finds a live
+        position with no matching ledger entry and halts until a human
+        confirms what it was and calls this to reconcile it (see that
+        method's own real incident for why this can't just be silently
+        auto-tracked). model_prob is recorded as 0.5 (neutral) rather than
+        left out entirely — record_settlement()'s miss-lesson logic reads
+        trade["model_prob"] unconditionally, and 0.5 means "no real
+        estimate exists" without crashing or fabricating a number Apex
+        never computed. First real incident: 2026-08-16, two Chicago
+        temperature buckets bought manually (confirmed via the exchange's
+        own manualOrderIndicator field) while Apex already held a third
+        bucket for the same city-day — something only a human could do,
+        since Apex's own one-bucket-per-city-day guard would never allow it."""
+        trade_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self.cash_cents -= cost_cents
+            self.committed_cents += cost_cents
+            self.trade_log.append(
+                {
+                    "id": trade_id,
+                    "opened_ts": datetime.now(timezone.utc).isoformat(),
+                    "market_slug": market_slug,
+                    "side": side,
+                    "count": count,
+                    "price_cents": price_cents,
+                    "cost_cents": cost_cents,
+                    "model_prob": 0.5,
+                    "market_implied_prob": price_cents / 100.0,
+                    "edge_pct": 0.0,
+                    "kelly_fraction_used": 0.0,
+                    "rationale": f"Manually placed by the user, not an Apex decision.{(' ' + note) if note else ''}",
+                    "status": "open",
+                    "manual": True,
+                }
+            )
+            self._save_locked()
+        return trade_id
+
     def open_trades(self) -> list[dict]:
         return [t for t in self.trade_log if t["status"] == "open"]
 
