@@ -56,6 +56,30 @@ MAX_CALIBRATION_ERROR_PCT = 10.0
 # needs to be re-run periodically to keep this current.
 STALE_HISTORY_DAYS = 3
 
+# TEMPORARY, data-motivated shrinkage on live trade sizing — 2026-08-16,
+# after two straight days of every open longshot bucket losing. Checked the
+# standardized residual z = (actual - forecast_mu) / forecast_sigma across
+# real settlements: the full history (Apr-Aug, n=328) is close to perfectly
+# calibrated (std(z)=1.05), but the last 15 days alone (n=67) run tighter
+# (std(z)=0.87), and 2026-08-15 alone (n=5, too small to trust on its own,
+# but consistent with the 15-day trend) tighter still (std(z)=0.57) --
+# real outcomes have been landing closer to forecast_mu than the model
+# assumes. A bucket several degrees off the mean is a tail event under a
+# Normal(mu, sigma); SHRINKING sigma pulls that same bucket further into
+# the tail and correctly lowers its estimated probability (verified
+# numerically before applying this: a bucket at mu+4.5..5.5 with sigma=2.0
+# scores 0.92%; at sigma=2.0*1.15 it roughly DOUBLES to 1.68% -- inflating
+# sigma would have made these exact losing trades look even more
+# attractive, backwards from what the data is saying). Applied only where
+# model_prob feeds a live trade decision (evaluate_bucket) -- deliberately
+# NOT applied in _build_calibration_table, which must keep measuring
+# historical accuracy against the real, un-shrunk sigma or it would corrupt
+# its own read of what actually happened. Revisit once more real
+# settlements accumulate past this stretch; 0.87 is the 15-day std(z)
+# directly (the more robust of the two recent-window estimates, not the
+# noisier single-day 0.57 figure).
+LIVE_SIGMA_SHRINKAGE = 0.87
+
 
 @dataclass(frozen=True)
 class BucketGrounding:
@@ -249,7 +273,11 @@ class WeatherGroundingEngine:
         forecast = self.forecast_for(city, date_str)
         if forecast is None:
             return None
-        mp = bucket_probability(forecast["forecast_mu"], forecast["forecast_sigma"], low, high)
+        # See LIVE_SIGMA_SHRINKAGE's comment -- live trade sizing only, the
+        # raw forecast_sigma below (stored on the returned grounding, and
+        # everywhere else in this class) is untouched.
+        live_sigma = forecast["forecast_sigma"] * LIVE_SIGMA_SHRINKAGE
+        mp = bucket_probability(forecast["forecast_mu"], live_sigma, low, high)
         if mp is None:
             return None
         trustworthy, note, count = self._trustworthiness(city, mp)

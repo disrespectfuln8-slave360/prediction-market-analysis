@@ -20,6 +20,7 @@ from src.trading.polymarket_us.apex.memory import (
     ApexMemory,
 )
 from src.trading.polymarket_us.apex.weather_model import (
+    LIVE_SIGMA_SHRINKAGE,
     MAX_CALIBRATION_ERROR_PCT,
     MIN_SAMPLE_FLOOR,
     STALE_HISTORY_DAYS,
@@ -361,6 +362,38 @@ def test_evaluate_bucket_checks_trustworthiness_independently_per_side(tmp_path)
         assert grounding.model_prob < 0.10
         assert grounding.calibration_trustworthy  # YES side: 0-10% decile is calibrated
         assert not grounding.calibration_trustworthy_no  # NO side: 90-100% decile is unverified
+    finally:
+        engine.close()
+
+
+def test_evaluate_bucket_shrinks_sigma_for_live_sizing_only(tmp_path):
+    """Regression/direction check for the 2026-08-16 sigma-shrinkage fix:
+    real settlements have been landing tighter around forecast_mu than
+    forecast_sigma implies (checked via standardized residuals across 328
+    historical outcomes), so live trade sizing shrinks sigma to correctly
+    LOWER the estimated probability of an off-mean bucket -- the opposite
+    of what an earlier, wrong-direction draft of this fix would have done
+    (inflating sigma, which would have made these exact losing bets look
+    even more attractive). model_prob must match bucket_probability computed
+    with sigma*LIVE_SIGMA_SHRINKAGE, be strictly lower than the raw-sigma
+    probability for this off-mean bucket, and the grounding's own
+    forecast_sigma field must stay the real, un-shrunk NOAA value."""
+    engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
+    try:
+        date_str = engine._local_today("nychigh")
+        engine._forecast_cache[("nychigh", date_str)] = {
+            "forecast_mu": 80.0, "forecast_sigma": 2.0, "forecast_cycle": "c",
+        }
+        grounding = engine.evaluate_bucket("nychigh", 84.0, 85.0)  # ~2-2.5 sigma above the mean
+
+        assert grounding is not None
+        assert grounding.forecast_sigma == 2.0  # raw NOAA value, untouched
+
+        expected = bucket_probability(80.0, 2.0 * LIVE_SIGMA_SHRINKAGE, 84.0, 85.0)
+        assert grounding.model_prob == pytest.approx(expected)
+
+        raw_sigma_prob = bucket_probability(80.0, 2.0, 84.0, 85.0)
+        assert grounding.model_prob < raw_sigma_prob
     finally:
         engine.close()
 
