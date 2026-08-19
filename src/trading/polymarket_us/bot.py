@@ -69,9 +69,11 @@ bought before trading at all — see SPORTS_PROP_DEPTH_MARGIN.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from src.trading.polymarket_us.strategy import (
@@ -119,6 +121,27 @@ UNKNOWN_DEPTH_CONTRACTS = 1
 # Slug prefix for live sports player-prop markets (see module docstring's
 # Rule 7). Confirmed the sole prefix behind every CRITICAL halt to date.
 SPORTS_PROP_PREFIX = "astatc-"
+
+# Published every scan so other live bots on this shared account (currently
+# sports_props_bot.py) can tell "something else already legitimately holds
+# this slug" apart from a real untracked anomaly of their own. Real incident
+# 2026-08-17: sports_props_bot halted on 6 of this bot's own astatc-mlb-*
+# lock legs, since both bots trade the identical slug family and nothing
+# distinguished "my own untracked trade" from "a sibling bot's legitimate
+# one" -- confirmed after the fact via manualOrderIndicator=AUTOMATIC on
+# the exchange's own trade records, matching prices this bot had just
+# logged placing.
+#
+# Despite the filename, this is NOT scoped to positions this bot itself
+# opened -- get_positions() returns the WHOLE shared account's holdings
+# (this bot never tracks "mine" separately from "what the account shows",
+# by design, see module docstring's Rule 1), so what's actually published
+# is every slug currently held by ANYONE on this account, as observed by
+# this bot's own routine scan. That still does the intended job (anything
+# sports_props_bot didn't itself open gets correctly excluded, regardless
+# of which sibling bot opened it) and is arguably more robust for it, just
+# don't read the name as "the ladder bot's own trades specifically".
+HELD_SLUGS_PATH = Path("data/polymarket_us/ladder_bot_held_slugs.json")
 
 # For astatc-* pairs, require the smaller side's book depth to be at least
 # this many times the size actually being traded before sizing a lock at
@@ -175,6 +198,22 @@ class LadderArbBot:
 
     def _held_slugs(self, positions, open_orders) -> set:
         return {p.market_slug for p in positions} | {o.market_slug for o in open_orders}
+
+    def _publish_held_slugs(self, positions) -> None:
+        """Best-effort only -- see HELD_SLUGS_PATH. Must never affect actual
+        trading if this fails (a bad disk, a permissions issue), so errors
+        are logged and swallowed rather than raised."""
+        try:
+            HELD_SLUGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_ts": datetime.now(timezone.utc).isoformat(),
+                "slugs": sorted({p.market_slug for p in positions}),
+            }
+            tmp = HELD_SLUGS_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(HELD_SLUGS_PATH)
+        except Exception as exc:
+            logger.debug("Failed to publish held slugs (non-fatal): %s", exc)
 
     # ── Position readback ────────────────────────────────────────────────────
 
@@ -474,6 +513,7 @@ class LadderArbBot:
 
     def _scan_once(self):
         positions = self.client.get_positions()
+        self._publish_held_slugs(positions)
         open_orders = self.client.get_open_orders()
         held = self._held_slugs(positions, open_orders)
 

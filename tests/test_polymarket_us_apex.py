@@ -1035,3 +1035,36 @@ def test_halted_bot_stops_trading_and_only_reports(tmp_path, monkeypatch):
     bot._scan_once()
 
     assert client.orders == []
+
+
+# ── clear_halt ───────────────────────────────────────────────────────────────
+# The programmatic form of "clear anomaly_halted_reason in the ledger file by
+# hand" -- added 2026-08-17 after a real incident needed exactly this
+# (sports_props_bot's stray-position halt on the ladder bot's own legs,
+# cleared by hand after confirming via the exchange's own trade records).
+
+def test_clear_halt_resets_the_anomaly_reason(tmp_path):
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    memory.halt("some anomaly")
+    assert memory.is_halted()
+
+    memory.clear_halt("confirmed explainable, see exchange trade records")
+
+    assert not memory.is_halted()
+    assert memory.anomaly_halted_reason is None
+
+
+def test_clear_halt_persists_across_a_reload(tmp_path):
+    path = tmp_path / "m.json"
+    first = ApexMemory(path=path, starting_bankroll_cents=1000)
+    first.halt("some anomaly")
+    first.clear_halt("confirmed explainable")
+
+    second = ApexMemory(path=path, starting_bankroll_cents=1000)
+    assert not second.is_halted()
+
+
+def test_clear_halt_on_an_already_clear_ledger_is_a_no_op(tmp_path):
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    memory.clear_halt("nothing to clear")  # must not raise
+    assert not memory.is_halted()

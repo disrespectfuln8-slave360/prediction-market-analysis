@@ -742,3 +742,23 @@ def test_scan_keeps_trading_one_cent_above_the_floor():
     bot._scan_once()
 
     assert bot._halted_reason is None
+
+
+def test_scan_publishes_held_slugs_for_other_live_bots_to_read(tmp_path, monkeypatch):
+    """sports_props_bot.py reads this file to tell "the ladder bot legitimately
+    holds this astatc-mlb-* position" apart from a real untracked anomaly of
+    its own -- real incident 2026-08-17, see sports_props_bot.py's
+    _reconcile_live_positions docstring."""
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient(LADDER, fills={})
+    client.positions["astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"] = 1.0
+    bot = make_bot(client)
+
+    bot._scan_once()
+
+    import json
+
+    from src.trading.polymarket_us.bot import HELD_SLUGS_PATH
+    payload = json.loads(HELD_SLUGS_PATH.read_text())
+    assert payload["slugs"] == ["astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"]
+    assert payload["updated_ts"]

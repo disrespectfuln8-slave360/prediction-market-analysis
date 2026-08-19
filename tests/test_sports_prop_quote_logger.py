@@ -38,12 +38,11 @@ def test_parses_mlb_total_bases_prop():
     }
 
 
-def test_parses_nfl_touchdown_prop():
-    meta = parse_prop_slug("astatc-nfl-lac-hou-2026-08-13-td-trelan-gte1")
-    assert meta == {
-        "sport": "nfl", "matchup": "lac-hou", "date": "2026-08-13",
-        "stat": "td", "player": "trelan", "threshold": 1,
-    }
+def test_rejects_nfl_now_that_its_tracked_by_its_own_module():
+    """NFL split out into nfl_prop_quote_logger.py 2026-08-17 -- this
+    module's job is MLB only now, even though the regex shape would
+    otherwise match an NFL slug fine."""
+    assert parse_prop_slug("astatc-nfl-lac-hou-2026-08-13-td-trelan-gte1") is None
 
 
 def test_rejects_non_ladder_shaped_astatc_markets():
@@ -194,6 +193,71 @@ def test_bucket_disappearing_moves_to_pending_settlement(tmp_path, monkeypatch):
 
     assert SLUG not in logger_._active
     assert SLUG in logger_._pending_settlement
+
+
+# ── Settlement verification against the real MLB Stats API ─────────────────
+# Real incident 2026-08-18: polymarket.us's own settlement determination was
+# confirmed to have a real, ~14% one-directional error rate (players who did
+# not play, or played and fell short, still settled YES). These tests cover
+# the override wiring itself with an injected fake verifier -- the real
+# verification logic (mlb_stats_verification.py) is covered by its own
+# dedicated, network-free unit tests in test_mlb_stats_verification.py.
+
+def test_settlement_verification_overrides_a_wrong_exchange_settlement(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})  # exchange says YES
+    logger_ = SportsPropQuoteLogger(client, verify_settlement_fn=lambda *a, **k: False)  # verified: really NO
+    logger_._pending_settlement[SLUG] = (parse_prop_slug(SLUG), 0)
+
+    logger_._check_settlements()
+
+    from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+    rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
+    assert rows[0]["outcome_yes"] is False  # the verified value won, not the exchange's
+
+
+def test_settlement_verification_agreeing_keeps_the_exchange_value(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
+    logger_ = SportsPropQuoteLogger(client, verify_settlement_fn=lambda *a, **k: True)
+    logger_._pending_settlement[SLUG] = (parse_prop_slug(SLUG), 0)
+
+    logger_._check_settlements()
+
+    from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+    rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
+    assert rows[0]["outcome_yes"] is True
+
+
+def test_settlement_verification_inconclusive_falls_back_to_the_exchange_value(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
+    logger_ = SportsPropQuoteLogger(client, verify_settlement_fn=lambda *a, **k: None)  # can't determine
+    logger_._pending_settlement[SLUG] = (parse_prop_slug(SLUG), 0)
+
+    logger_._check_settlements()
+
+    from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+    rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
+    assert rows[0]["outcome_yes"] is True  # exchange's own settlement, unverified but not overridden
+
+
+def test_settlement_verification_raising_falls_back_to_the_exchange_value(tmp_path, monkeypatch):
+    """A verification bug or transient network failure must never take
+    trading data down with it -- same fail-open-to-old-behavior posture as
+    every other best-effort check in this codebase."""
+    monkeypatch.chdir(tmp_path)
+    def _boom(*a, **k):
+        raise RuntimeError("MLB Stats API is down")
+    client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
+    logger_ = SportsPropQuoteLogger(client, verify_settlement_fn=_boom)
+    logger_._pending_settlement[SLUG] = (parse_prop_slug(SLUG), 0)
+
+    logger_._check_settlements()
+
+    from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+    rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
+    assert rows[0]["outcome_yes"] is True
 
 
 def test_resolved_settlement_is_logged_and_cleared_from_pending(tmp_path, monkeypatch):

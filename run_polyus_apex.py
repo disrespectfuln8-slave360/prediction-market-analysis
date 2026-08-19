@@ -77,7 +77,7 @@ def make_polymarket_us_client():
 
 def make_apex_memory() -> ApexMemory:
     path = APEX_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_APEX") else APEX_MEMORY_LIVE_PATH
-    return ApexMemory(path=path)
+    return ApexMemory(path=path, label="Apex")
 
 
 def main():

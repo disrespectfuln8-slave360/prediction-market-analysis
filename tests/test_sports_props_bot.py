@@ -4,8 +4,17 @@ Mirrors test_polymarket_us_apex.py's style closely -- same fake client
 shape, same FakeGrounding-equivalent pattern -- since sports_props_bot.py
 itself reuses apex.risk and apex.memory.ApexMemory directly rather than
 re-deriving the same money-critical logic.
+
+Every test that reaches _scan_once() (and so _reconcile_live_positions())
+uses monkeypatch.chdir(tmp_path) -- _ladder_bot_held_slugs() reads a real
+relative path (bot.py's HELD_SLUGS_PATH) that, left pointed at the actual
+repo root, would read whatever the real live ladder bot currently has
+published on disk. Added 2026-08-17 alongside that read, to keep tests from
+silently depending on live production state.
 """
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -101,10 +110,25 @@ def make_bot(client, calibration, memory):
     return SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=1)
 
 
+def _publish_ladder_holdings(slugs) -> None:
+    """Write bot.py's HELD_SLUGS_PATH the same shape LadderArbBot._publish_
+    held_slugs() does, for tests exercising sports_props_bot's read side.
+    Caller must have already monkeypatch.chdir'd into an isolated tmp_path."""
+    from datetime import datetime, timezone
+
+    from src.trading.polymarket_us.bot import HELD_SLUGS_PATH
+    HELD_SLUGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HELD_SLUGS_PATH.write_text(json.dumps({
+        "updated_ts": datetime.now(timezone.utc).isoformat(),
+        "slugs": sorted(slugs),
+    }))
+
+
 SLUG = "astatc-mlb-nyy-bos-2026-08-15-hits-player1-gte1"
 
 
-def test_scan_buys_yes_when_calibration_shows_a_trustworthy_edge(tmp_path):
+def test_scan_buys_yes_when_calibration_shows_a_trustworthy_edge(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
     calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
@@ -121,7 +145,8 @@ def test_scan_buys_yes_when_calibration_shows_a_trustworthy_edge(tmp_path):
     assert memory.open_trades()[0]["side"] == "yes"
 
 
-def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path):
+def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=70, yes_ask=95)
     # NO costs 100-70=30; grounding keyed on the NO cost price.
     grounding = make_grounding("mlb", "hits", "no", 30, actual_rate=70.0)
@@ -140,7 +165,7 @@ def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path):
     assert trade["price_cents"] == 30
 
 
-def test_scan_reevaluates_calibration_at_the_requoted_price_not_the_stale_scan_price(tmp_path):
+def test_scan_reevaluates_calibration_at_the_requoted_price_not_the_stale_scan_price(tmp_path, monkeypatch):
     """Regression: model_prob used to come from the grounding computed
     against the bulk-scan price, never re-checked against the price the
     order actually requotes to. calibration_actual_rate is scoped to a
@@ -151,6 +176,7 @@ def test_scan_reevaluates_calibration_at_the_requoted_price_not_the_stale_scan_p
     but the price has actually moved to 70 by requote time, where there's
     no calibration data at all -- the trade must be skipped, not placed
     using the stale 40c grounding."""
+    monkeypatch.chdir(tmp_path)
     scan_market = make_market(SLUG, yes_bid=38, yes_ask=40)
     requoted_market = make_market(SLUG, yes_bid=68, yes_ask=70)
     grounding_at_scan_price = make_grounding("mlb", "hits", "yes", 40, actual_rate=90.0)
@@ -165,7 +191,8 @@ def test_scan_reevaluates_calibration_at_the_requoted_price_not_the_stale_scan_p
     assert memory.open_trades() == []
 
 
-def test_scan_passes_when_calibration_is_untrustworthy(tmp_path):
+def test_scan_passes_when_calibration_is_untrustworthy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     calibration = FakeCalibration({})  # nothing trustworthy anywhere
     client = FakeClient([market], fills={SLUG: 99})
@@ -178,7 +205,8 @@ def test_scan_passes_when_calibration_is_untrustworthy(tmp_path):
     assert memory.open_trades() == []
 
 
-def test_scan_never_stacks_a_second_position_in_the_same_game(tmp_path):
+def test_scan_never_stacks_a_second_position_in_the_same_game(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     held_slug = "astatc-mlb-nyy-bos-2026-08-15-tb-player2-gte1"
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
@@ -197,18 +225,32 @@ def test_scan_never_stacks_a_second_position_in_the_same_game(tmp_path):
     assert len(memory.open_trades()) == 1
 
 
-def test_different_games_can_both_be_traded(tmp_path):
+def test_different_games_can_both_be_traded(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     other_slug = "astatc-mlb-lad-sfo-2026-08-15-hits-player3-gte1"
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
-    other_market = make_market(other_slug, yes_bid=38, yes_ask=40)
+    # A different price decile than SLUG's (70c, not 40c) -- otherwise this
+    # is exactly the bucket-collision the guard below exists to catch, which
+    # isn't what THIS test is checking (see test_scan_blocks_a_second_game_
+    # landing_in_the_same_calibration_bucket for that). actual_rate=90 at
+    # 70c keeps a clear, tradeable edge (a 70/70 combination would price in
+    # ~zero edge and get skipped for an unrelated reason).
+    other_market = make_market(other_slug, yes_bid=68, yes_ask=70)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
-    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    other_grounding = make_grounding("mlb", "hits", "yes", 70, actual_rate=90.0)
+    calibration = FakeCalibration({
+        ("mlb", "hits", "yes", 40): grounding,
+        ("mlb", "hits", "yes", 70): other_grounding,
+    })
     client = FakeClient([market, other_market], fills={SLUG: 99, other_slug: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug="astatc-mlb-nyy-bos-2026-08-14-hits-playerx-gte1",  # different DATE, different game
-        side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.7, market_implied_prob=0.4, edge_pct=0.3, kelly_fraction_used=0.05,
+        # Different DATE, different game, AND a third, distinct price decile
+        # (90c -- not SLUG's 40c or other_slug's 70c) -- same reasoning as
+        # above, stay out of both candidates' buckets.
+        market_slug="astatc-mlb-nyy-bos-2026-08-14-hits-playerx-gte1",
+        side="yes", count=1.0, price_cents=90, cost_cents=90,
+        model_prob=0.9, market_implied_prob=0.9, edge_pct=0.3, kelly_fraction_used=0.05,
     )
 
     bot = make_bot(client, calibration, memory)
@@ -217,7 +259,74 @@ def test_different_games_can_both_be_traded(tmp_path):
     assert len(client.orders) == 2
 
 
-def test_terminated_bot_only_observes(tmp_path):
+# ── Bucket-correlation guard ──────────────────────────────────────────────────
+# Real incident 2026-08-17: 4 of 6 real trades that day all drew on the
+# identical (mlb, tb, yes, 10-20%) calibration bucket and lost together --
+# not four independent bets, the same underlying signal fired four times.
+# Orthogonal to the per-game guard above: these are DIFFERENT games.
+
+def test_scan_blocks_a_second_game_landing_in_the_same_calibration_bucket(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    other_slug = "astatc-mlb-lad-sfo-2026-08-15-tb-player3-gte1"
+    # Same stat/side/price on two DIFFERENT games -- same bucket_key.
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    other_market = make_market(other_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market, other_market], fills={SLUG: 99, other_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert len(client.orders) == 1  # the second game's identical-bucket candidate was skipped
+
+
+def test_an_already_open_position_blocks_a_new_bucket_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    held_slug = "astatc-mlb-lad-sfo-2026-08-14-hits-player2-gte1"  # different game, different day
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market], fills={SLUG: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+    memory.record_open(
+        market_slug=held_slug, side="yes", count=1.0, price_cents=40, cost_cents=40,
+        model_prob=0.7, market_implied_prob=0.4, edge_pct=0.3, kelly_fraction_used=0.05,
+    )
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert client.orders == []  # SLUG is a different game, but the same (mlb, hits, yes, 40c-decile) bucket
+    assert len(memory.open_trades()) == 1
+
+
+def test_different_deciles_of_the_same_stat_are_independent_bets(tmp_path, monkeypatch):
+    """The guard must not overreach -- two candidates that happen to share a
+    (sport, stat, side) but land in DIFFERENT price deciles are genuinely
+    different calibration signals and must both be tradeable."""
+    monkeypatch.chdir(tmp_path)
+    other_slug = "astatc-mlb-lad-sfo-2026-08-15-hits-player3-gte1"
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)  # 40c -> 40-50% decile
+    other_market = make_market(other_slug, yes_bid=68, yes_ask=70)  # 70c -> 70-80% decile
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    other_grounding = make_grounding("mlb", "hits", "yes", 70, actual_rate=75.0)
+    calibration = FakeCalibration({
+        ("mlb", "hits", "yes", 40): grounding,
+        ("mlb", "hits", "yes", 70): other_grounding,
+    })
+    client = FakeClient([market, other_market], fills={SLUG: 99, other_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert len(client.orders) == 2
+
+
+def test_terminated_bot_only_observes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
     calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
@@ -231,7 +340,8 @@ def test_terminated_bot_only_observes(tmp_path):
     assert client.orders == []
 
 
-def test_stale_calibration_blocks_trading(tmp_path):
+def test_stale_calibration_blocks_trading(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
     calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding}, stale=True)
@@ -265,7 +375,8 @@ def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
     assert len(memory.lessons) == 1
 
 
-def test_untracked_live_position_halts_before_trading(tmp_path):
+def test_untracked_live_position_halts_before_trading(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     stray_slug = "astatc-mlb-lad-sfo-2026-08-14-tb-playerz-gte1"
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
@@ -282,10 +393,56 @@ def test_untracked_live_position_halts_before_trading(tmp_path):
     assert stray_slug in memory.anomaly_halted_reason
 
 
-def test_reconciliation_ignores_other_bots_live_positions(tmp_path):
+def test_scan_recognizes_nfl_slugs_via_the_dedicated_nfl_parser(tmp_path, monkeypatch):
+    """NFL split into its own nfl_prop_quote_logger.py 2026-08-17 -- this
+    bot's own market-scanning must still recognize NFL per-game matchup
+    slugs via _parse_any_prop_slug, even though parse_prop_slug (the shared
+    MLB-only module) no longer does."""
+    monkeypatch.chdir(tmp_path)
+    nfl_slug = "astatc-nfl-den-atl-2026-08-14-ptd-jarsti-gte1"
+    market = make_market(nfl_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("nfl", "ptd", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("nfl", "ptd", "yes", 40): grounding})
+    client = FakeClient([market], fills={nfl_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert len(client.orders) == 1
+    slug, side, count, yes_price, ioc = client.orders[0]
+    assert (slug, side, yes_price) == (nfl_slug, "yes", 40)
+    assert memory.open_trades()[0]["side"] == "yes"
+
+
+def test_mlb_and_nfl_games_on_the_same_day_are_independent_slots(tmp_path, monkeypatch):
+    """The one-position-per-game guard is keyed on (sport, matchup, date) --
+    an NFL game must never be treated as "the same game" as an MLB one just
+    because both happen to share a date."""
+    monkeypatch.chdir(tmp_path)
+    nfl_slug = "astatc-nfl-den-atl-2026-08-15-ptd-jarsti-gte1"
+    mlb_market = make_market(SLUG, yes_bid=38, yes_ask=40)  # SLUG's date is 2026-08-15
+    nfl_market = make_market(nfl_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    nfl_grounding = make_grounding("nfl", "ptd", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({
+        ("mlb", "hits", "yes", 40): grounding,
+        ("nfl", "ptd", "yes", 40): nfl_grounding,
+    })
+    client = FakeClient([mlb_market, nfl_market], fills={SLUG: 99, nfl_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert len(client.orders) == 2
+
+
+def test_reconciliation_ignores_other_bots_live_positions(tmp_path, monkeypatch):
     """Shared account with the ladder bot (astatc- arb locks that don't
     match this parser's shape) and Apex (tc-temp-* weather) -- neither
     should ever trigger a halt here."""
+    monkeypatch.chdir(tmp_path)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
     calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
@@ -299,3 +456,97 @@ def test_reconciliation_ignores_other_bots_live_positions(tmp_path):
 
     assert not memory.is_halted()
     assert len(client.orders) == 1
+
+
+# ── Cross-bot ambiguity: ladder bot positions in the same slug family ────────
+# Real incident 2026-08-17: sports_props_bot halted on 6 of the ladder bot's
+# own astatc-mlb-* lock legs, since (unlike Apex's tc-temp-* prefix) the
+# ladder bot trades the identical slug family this bot does, and nothing
+# distinguished "my own untracked trade" from "a sibling bot's legitimate
+# one". Fixed by having the ladder bot publish its own held slugs (bot.py's
+# HELD_SLUGS_PATH) for this bot to subtract before deciding what's stray.
+
+def test_position_matching_the_ladder_bots_published_holdings_does_not_halt(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ladder_slug = "astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market], fills={SLUG: 99})
+    client.positions[ladder_slug] = 1.0
+    _publish_ladder_holdings({ladder_slug})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert not memory.is_halted()
+    assert len(client.orders) == 1  # still trades its own genuine candidate
+
+
+def test_a_position_not_in_the_ladder_bots_published_holdings_still_halts(tmp_path, monkeypatch):
+    """The fix must not blind this check entirely -- a position in the same
+    astatc-mlb-* family that the ladder bot does NOT claim is still a real,
+    unexplained anomaly and must still halt."""
+    monkeypatch.chdir(tmp_path)
+    ladder_slug = "astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"
+    genuinely_stray_slug = "astatc-mlb-lad-sfo-2026-08-14-tb-playerz-gte1"
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market], fills={SLUG: 99})
+    client.positions[genuinely_stray_slug] = 2.0
+    _publish_ladder_holdings({ladder_slug})  # doesn't mention genuinely_stray_slug
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert memory.is_halted()
+    assert genuinely_stray_slug in memory.anomaly_halted_reason
+
+
+def test_stale_ladder_publish_file_falls_back_to_the_cautious_default(tmp_path, monkeypatch):
+    """A ladder-bot publish file that hasn't been updated recently (crashed,
+    stopped, scheduled task disabled) must not be trusted forever -- falls
+    back to treating the position as potentially stray, same as if the file
+    didn't exist at all."""
+    monkeypatch.chdir(tmp_path)
+    from datetime import datetime, timedelta, timezone
+
+    from src.trading.polymarket_us.bot import HELD_SLUGS_PATH
+    from src.trading.polymarket_us.sports_props_bot import LADDER_HELD_SLUGS_STALE_SECS
+
+    ladder_slug = "astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"
+    HELD_SLUGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    stale_ts = datetime.now(timezone.utc) - timedelta(seconds=LADDER_HELD_SLUGS_STALE_SECS + 60)
+    HELD_SLUGS_PATH.write_text(json.dumps({"updated_ts": stale_ts.isoformat(), "slugs": [ladder_slug]}))
+
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market], fills={SLUG: 99})
+    client.positions[ladder_slug] = 1.0
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert memory.is_halted()  # stale publish file -- not trusted, falls back to halting
+    assert ladder_slug in memory.anomaly_halted_reason
+
+
+def test_missing_ladder_publish_file_falls_back_to_the_cautious_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    stray_slug = "astatc-mlb-lad-sfo-2026-08-14-tb-playerz-gte1"
+    market = make_market(SLUG, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("mlb", "hits", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("mlb", "hits", "yes", 40): grounding})
+    client = FakeClient([market], fills={SLUG: 99})
+    client.positions[stray_slug] = 2.0  # no ladder publish file written at all
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory)
+    bot._scan_once()
+
+    assert memory.is_halted()

@@ -59,6 +59,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from src.common.single_instance import acquire_single_instance_lock
 from src.trading.mode import is_paper_mode, log_mode_banner
 from src.trading.polymarket_us.apex.memory import ApexMemory
+from src.trading.polymarket_us.nfl_prop_quote_logger import QUOTES_PATH as NFL_QUOTES_PATH
+from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH as NFL_SETTLEMENTS_PATH
 from src.trading.polymarket_us.sports_prop_calibration import SportsPropCalibrationEngine
 from src.trading.polymarket_us.sports_props_bot import SportsPropsBot
 from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
@@ -87,7 +89,7 @@ def make_polymarket_us_client():
 
 def make_sports_props_memory() -> ApexMemory:
     path = SPORTS_PROPS_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_SPORTS_PROPS") else SPORTS_PROPS_MEMORY_LIVE_PATH
-    return ApexMemory(path=path)
+    return ApexMemory(path=path, label="sports_props")
 
 
 def main():
@@ -107,7 +109,11 @@ def main():
 
     client = make_polymarket_us_client()
     memory = make_sports_props_memory()
-    calibration = SportsPropCalibrationEngine()
+    # NFL's own data files (nfl_prop_quote_logger.py) merge in alongside the
+    # primary MLB pair -- calibration is already scoped per (sport, stat)
+    # regardless of source file, see SportsPropCalibrationEngine's own
+    # extra_sources docstring.
+    calibration = SportsPropCalibrationEngine(extra_sources=((NFL_QUOTES_PATH, NFL_SETTLEMENTS_PATH),))
     bot = SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=300)
 
     logging.getLogger("launcher").info("Sports-props trading bot running. Ctrl+C to stop.")

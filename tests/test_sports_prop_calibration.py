@@ -186,3 +186,70 @@ def test_recent_settlement_is_not_stale(tmp_path):
 
     engine = SportsPropCalibrationEngine(quotes_path=quotes_path, settlements_path=settlements_path)
     assert not engine.data_is_stale()
+
+
+# ── extra_sources (NFL's own files, merged alongside the primary MLB pair) ────
+
+def test_extra_sources_are_merged_into_the_same_table(tmp_path):
+    """NFL's own dedicated files (nfl_prop_quote_logger.py) merge in
+    alongside the primary pair -- a bucket sourced entirely from an extra
+    source must be gradeable exactly like one from the primary pair."""
+    quotes_path = tmp_path / "quotes.jsonl"
+    settlements_path = tmp_path / "settlements.jsonl"
+    nfl_quotes_path = tmp_path / "nfl_quotes.jsonl"
+    nfl_settlements_path = tmp_path / "nfl_settlements.jsonl"
+
+    n = MIN_SAMPLE_FLOOR + 10
+    quotes = [_quote(f"slug-{i}", sport="nfl", stat="td", ask=65) for i in range(n)]
+    wins = int(n * 0.65)
+    settlements = [_settlement(f"slug-{i}", sport="nfl", stat="td", outcome_yes=(i < wins)) for i in range(n)]
+    _write_jsonl(nfl_quotes_path, quotes)
+    _write_jsonl(nfl_settlements_path, settlements)
+    # Primary pair stays empty -- everything here comes from the extra source.
+    _write_jsonl(quotes_path, [])
+    _write_jsonl(settlements_path, [])
+
+    engine = SportsPropCalibrationEngine(
+        quotes_path=quotes_path, settlements_path=settlements_path,
+        extra_sources=((nfl_quotes_path, nfl_settlements_path),),
+    )
+    grounding = engine.evaluate("nfl", "td", "yes", price_cents=65)
+
+    assert grounding.calibration_trustworthy
+    assert grounding.calibration_sample_count == n
+
+
+def test_extra_sources_never_pool_with_the_primary_sports_stat_categories(tmp_path):
+    """Merging file sources must not blur (sport, stat) scoping -- an MLB
+    "hits" bucket in the primary pair and an NFL "td" bucket in an extra
+    source must stay fully independent, same discipline as
+    test_categories_are_never_pooled."""
+    quotes_path = tmp_path / "quotes.jsonl"
+    settlements_path = tmp_path / "settlements.jsonl"
+    nfl_quotes_path = tmp_path / "nfl_quotes.jsonl"
+    nfl_settlements_path = tmp_path / "nfl_settlements.jsonl"
+
+    n = MIN_SAMPLE_FLOOR + 10
+    mlb_quotes = [_quote(f"mlb-{i}", sport="mlb", stat="hits", ask=50) for i in range(n)]
+    # ask=50 -> the 50-60% decile, midpoint 55 -- win rate has to land near
+    # that to be trustworthy, not just clear the sample floor.
+    mlb_wins = int(n * 0.55)
+    mlb_settlements = [_settlement(f"mlb-{i}", sport="mlb", stat="hits", outcome_yes=(i < mlb_wins)) for i in range(n)]
+    _write_jsonl(quotes_path, mlb_quotes)
+    _write_jsonl(settlements_path, mlb_settlements)
+    # Only 5 NFL samples in the extra source -- well under the floor.
+    nfl_quotes = [_quote(f"nfl-{i}", sport="nfl", stat="td", ask=50) for i in range(5)]
+    nfl_settlements = [_settlement(f"nfl-{i}", sport="nfl", stat="td", outcome_yes=True) for i in range(5)]
+    _write_jsonl(nfl_quotes_path, nfl_quotes)
+    _write_jsonl(nfl_settlements_path, nfl_settlements)
+
+    engine = SportsPropCalibrationEngine(
+        quotes_path=quotes_path, settlements_path=settlements_path,
+        extra_sources=((nfl_quotes_path, nfl_settlements_path),),
+    )
+    mlb_grounding = engine.evaluate("mlb", "hits", "yes", price_cents=50)
+    nfl_grounding = engine.evaluate("nfl", "td", "yes", price_cents=50)
+
+    assert mlb_grounding.calibration_trustworthy  # well past the floor on its own
+    assert not nfl_grounding.calibration_trustworthy  # NFL's thin sample doesn't borrow MLB's floor
+    assert nfl_grounding.calibration_sample_count == 5

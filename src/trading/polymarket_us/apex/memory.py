@@ -59,9 +59,11 @@ class ApexMemory:
         self,
         path: Path = DEFAULT_MEMORY_PATH,
         starting_bankroll_cents: int = DEFAULT_STARTING_BANKROLL_CENTS,
+        label: str = "Apex",
     ):
         self.path = path
         self._lock = threading.Lock()
+        self.label = label  # this class is shared with sports_props_bot.py -- keeps log/rationale text honest about which bot it is
         self.starting_bankroll_cents = starting_bankroll_cents
         self.cash_cents = starting_bankroll_cents
         self.committed_cents = 0
@@ -82,7 +84,7 @@ class ApexMemory:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("[apex] Failed to load memory at %s, starting fresh: %s", self.path, exc)
+            logger.warning("[%s] Failed to load memory at %s, starting fresh: %s", self.label.lower(), self.path, exc)
             return
         self.starting_bankroll_cents = raw.get("starting_bankroll_cents", self.starting_bankroll_cents)
         self.cash_cents = raw.get("cash_cents", self.cash_cents)
@@ -95,7 +97,8 @@ class ApexMemory:
         self.daily_start_bankroll_cents = raw.get("daily_start_bankroll_cents", self.bankroll_cents)
         self.daily_date = raw.get("daily_date", _today_utc())
         logger.info(
-            "[apex] Loaded memory: bankroll=$%.2f  open_trades=%d  lessons=%d%s",
+            "[%s] Loaded memory: bankroll=$%.2f  open_trades=%d  lessons=%d%s",
+            self.label.lower(),
             self.bankroll_cents / 100,
             len(self.open_trades()),
             len(self.lessons),
@@ -170,7 +173,25 @@ class ApexMemory:
         with self._lock:
             if self.anomaly_halted_reason is None:
                 self.anomaly_halted_reason = reason
-                logger.error("[apex] CRITICAL: HALTED — %s", reason)
+                logger.error("[%s] CRITICAL: HALTED — %s", self.label.lower(), reason)
+                self._save_locked()
+
+    def clear_halt(self, note: str) -> None:
+        """The programmatic form of "clear anomaly_halted_reason in the
+        ledger file by hand" -- for when a human (or an agent acting on a
+        human's explicit confirmation) has actually verified what triggered
+        halt() is explainable, e.g. real exchange evidence showing an
+        "untracked" position belongs to a sibling live bot's own legitimate
+        trade rather than a genuine anomaly. Never called automatically by
+        this class itself -- see halt()'s own docstring on why this never
+        clears on its own."""
+        with self._lock:
+            if self.anomaly_halted_reason is not None:
+                logger.warning(
+                    "[%s] Halt cleared: %s (was: %s)",
+                    self.label.lower(), note, self.anomaly_halted_reason,
+                )
+                self.anomaly_halted_reason = None
                 self._save_locked()
 
     def check_external_balance(self, balance_cents: int) -> None:
@@ -198,21 +219,21 @@ class ApexMemory:
             if self.cash_cents <= TERMINATION_FLOOR_CENTS:
                 self.terminated_reason = (
                     f"real exchange balance ${balance_cents / 100:.2f} at or below the "
-                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, and Apex's own tracked cash "
+                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, and {self.label}'s own tracked cash "
                     f"${self.cash_cents / 100:.2f} agrees it's genuinely spent "
                     "(independent check against the live account)"
                 )
-                logger.error("[apex] CRITICAL: TERMINATED — %s", self.terminated_reason)
+                logger.error("[%s] CRITICAL: TERMINATED — %s", self.label.lower(), self.terminated_reason)
                 self._save_locked()
             elif self.daily_halted_reason is None:
                 self.daily_halted_reason = (
                     f"real exchange balance ${balance_cents / 100:.2f} at or below the "
-                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, but Apex's own tracked cash "
+                    f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor, but {self.label}'s own tracked cash "
                     f"${self.cash_cents / 100:.2f} is still healthy — looks like a shared-account "
                     "dip from another live bot, not a real loss. Halting for today rather than "
                     "terminating; re-checked fresh every scan."
                 )
-                logger.warning("[apex] Trading halted for the rest of the day — %s", self.daily_halted_reason)
+                logger.warning("[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason)
                 self._save_locked()
 
     # ── Trade lifecycle ──────────────────────────────────────────────────────
@@ -295,7 +316,7 @@ class ApexMemory:
                     "market_implied_prob": price_cents / 100.0,
                     "edge_pct": 0.0,
                     "kelly_fraction_used": 0.0,
-                    "rationale": f"Manually placed by the user, not an Apex decision.{(' ' + note) if note else ''}",
+                    "rationale": f"Manually placed by the user, not an {self.label} decision.{(' ' + note) if note else ''}",
                     "status": "open",
                     "manual": True,
                 }
@@ -373,7 +394,7 @@ class ApexMemory:
                 f"bankroll ${bankroll / 100:.2f} at or below the "
                 f"${TERMINATION_FLOOR_CENTS / 100:.2f} floor as of {trigger_desc}"
             )
-            logger.error("[apex] CRITICAL: TERMINATED — %s", self.terminated_reason)
+            logger.error("[%s] CRITICAL: TERMINATED — %s", self.label.lower(), self.terminated_reason)
 
         drawdown = self.daily_drawdown_fraction()
         if drawdown > DAILY_DRAWDOWN_HALT_FRACTION and self.daily_halted_reason is None:
@@ -381,7 +402,7 @@ class ApexMemory:
                 f"daily drawdown {drawdown * 100:.1f}% exceeds the "
                 f"{DAILY_DRAWDOWN_HALT_FRACTION * 100:.0f}% circuit breaker"
             )
-            logger.warning("[apex] Trading halted for the rest of the day — %s", self.daily_halted_reason)
+            logger.warning("[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason)
 
     # ── Lessons / session recall ────────────────────────────────────────────
 
@@ -401,7 +422,7 @@ class ApexMemory:
         settled = [t for t in self.trade_log if t["status"] == "settled"]
         realized_pnl = sum(t.get("pnl_cents", 0) for t in settled)
         lines = [
-            f"Apex session start — bankroll ${self.bankroll_cents / 100:.2f} "
+            f"{self.label} session start — bankroll ${self.bankroll_cents / 100:.2f} "
             f"(started at ${self.starting_bankroll_cents / 100:.2f}, "
             f"realized P&L ${realized_pnl / 100:+.2f} over {len(settled)} settled trade(s), "
             f"{open_ct} open).",

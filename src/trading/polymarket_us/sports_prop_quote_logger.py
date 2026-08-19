@@ -1,4 +1,12 @@
-"""Read-only quote+outcome logger: polymarket.us MLB/NFL player-prop markets.
+"""Read-only quote+outcome logger: polymarket.us MLB player-prop markets.
+
+NFL split out into its own dedicated nfl_prop_quote_logger.py on 2026-08-17,
+per explicit user request -- see that module's docstring for the real
+market-shape survey behind the split (NFL's astatc-nfl- family turned out to
+span three genuinely different bet shapes, only one of which is tracked at
+all). SPORTS below stays a tuple (not a bare "mlb" str) so a future sport
+sharing MLB's exact per-game-matchup-ladder shape can still be added here
+directly, the way NFL originally was.
 
 Weather has NOAA as an independent forecast to calibrate against; nothing
 equivalent exists for "will this batter get 3+ total bases tonight" --
@@ -30,6 +38,17 @@ Two output streams, meant to be joined later by slug for calibration:
     data/polymarket_us/sports_prop_quotes.jsonl      -- one row per bucket per poll
     data/polymarket_us/sports_prop_settlements.jsonl -- one row per resolved bucket
 
+Settlement verification (added 2026-08-18)
+--------------------------------------------
+Every settlement is cross-checked against the real MLB Stats API before
+being written -- see mlb_stats_verification.py's own docstring for why:
+polymarket.us's own settlement determination was confirmed live to have a
+real, ~14% one-directional error rate (players who did not play, or played
+and genuinely fell short, still settled YES). A disagreement uses the
+verified value and logs a loud warning; an inconclusive check (game/player
+not resolvable) falls back to trusting the exchange, same as before this
+existed.
+
 READ-ONLY: only list_all_markets/get_bbo/get_settlement are ever called.
 Never places, cancels, or otherwise touches an order -- shares a client
 and account with the live ladder bot, which trades a completely separate
@@ -47,11 +66,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.trading.polymarket_us import mlb_stats_verification
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
 
 logger = logging.getLogger(__name__)
 
-SPORTS = ("mlb", "nfl")
+SPORTS = ("mlb",)
 POLL_INTERVAL_SECS = 300
 QUOTES_PATH = Path("data/polymarket_us/sports_prop_quotes.jsonl")
 SETTLEMENTS_PATH = Path("data/polymarket_us/sports_prop_settlements.jsonl")
@@ -88,8 +108,16 @@ def parse_prop_slug(slug: str) -> Optional[dict]:
 
 
 class SportsPropQuoteLogger:
-    def __init__(self, client):
+    def __init__(self, client, verify_settlement_fn=mlb_stats_verification.verify_settlement):
         self.client = client  # PolymarketUSTradingClient (market data only)
+        # Injectable so tests can substitute a fake without real network
+        # calls; defaults to the real MLB Stats API cross-check (see that
+        # module's docstring for why this exists -- polymarket.us's own
+        # settlements were confirmed to have a real, ~14% one-directional
+        # error rate live 2026-08-18).
+        self._verify_settlement_fn = verify_settlement_fn
+        self._schedule_cache: dict = {}
+        self._boxscore_cache: dict = {}
         self._active: dict[str, dict] = {}  # slug -> parsed metadata
         self._pending_settlement: dict[str, tuple[dict, int]] = {}  # slug -> (metadata, cycles waited)
         # sports_prop_calibration.py's _build_calibration_table only ever
@@ -225,10 +253,26 @@ class SportsPropQuoteLogger:
                 still_pending[slug] = (meta, cycles_waited + 1)
                 continue
 
+            outcome_yes = settlement_cents >= 50
+            try:
+                verified = self._verify_settlement_fn(
+                    self.client, slug, meta, self._schedule_cache, self._boxscore_cache,
+                )
+            except Exception as exc:
+                logger.debug("Settlement verification failed for %s (trusting the exchange): %s", slug, exc)
+                verified = None
+            if verified is not None and verified != outcome_yes:
+                logger.warning(
+                    "Settlement CORRECTED for %s: exchange said outcome_yes=%s, verified against "
+                    "the real MLB box score says %s -- using the verified value",
+                    slug, outcome_yes, verified,
+                )
+                outcome_yes = verified
+
             self._append(SETTLEMENTS_PATH, {
                 "resolved_ts": datetime.now(timezone.utc).isoformat(),
                 "slug": slug, **meta,
-                "outcome_yes": settlement_cents >= 50,
+                "outcome_yes": outcome_yes,
             })
             resolved += 1
         self._pending_settlement = still_pending

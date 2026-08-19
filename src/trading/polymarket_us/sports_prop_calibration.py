@@ -159,9 +159,27 @@ class SportsPropCalibrationEngine:
         self,
         quotes_path: Path = DEFAULT_QUOTES_PATH,
         settlements_path: Path = DEFAULT_SETTLEMENTS_PATH,
+        extra_sources: tuple[tuple[Path, Path], ...] = (),
     ):
+        """extra_sources: additional (quotes_path, settlements_path) pairs to
+        merge in alongside the primary pair -- e.g. nfl_prop_quote_logger.py's
+        own dedicated files, split out from the shared sports_prop_*.jsonl on
+        2026-08-17 so NFL has its own data (see that module's docstring).
+        Safe to merge: _build_calibration_table keys purely on each ROW's own
+        (sport, stat) fields, never on which file it came from, so combining
+        sources here doesn't re-introduce the pooling this class exists to
+        avoid -- it's the same table a single logger covering every sport
+        would have produced.
+
+        Staleness (data_is_stale) is computed across the POOLED settlement
+        timestamps -- stale only if EVERY source has gone quiet, not each
+        independently. Simple on purpose: this flag exists to catch "is the
+        collection pipeline broadly alive", not to track each sport's own
+        cadence separately, and a sport with genuinely no games running
+        (e.g. NFL in the off-season) isn't "stale", it's just quiet."""
         self.quotes_path = quotes_path
         self.settlements_path = settlements_path
+        self.extra_sources = extra_sources
         self._table: dict[tuple[str, str], dict[str, dict[int, dict]]] = {}
         self._last_settlement_ts: Optional[str] = None
         self.reload()
@@ -169,6 +187,9 @@ class SportsPropCalibrationEngine:
     def reload(self) -> None:
         quotes = _read_jsonl(self.quotes_path)
         settlements = _read_jsonl(self.settlements_path)
+        for extra_quotes_path, extra_settlements_path in self.extra_sources:
+            quotes += _read_jsonl(extra_quotes_path)
+            settlements += _read_jsonl(extra_settlements_path)
         self._table = _build_calibration_table(quotes, settlements)
         timestamps = [s["resolved_ts"] for s in settlements if s.get("resolved_ts")]
         self._last_settlement_ts = max(timestamps) if timestamps else None

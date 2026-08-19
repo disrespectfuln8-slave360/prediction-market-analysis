@@ -28,9 +28,20 @@ many players' stat lines at once) the same way same-city-same-day weather
 buckets are draws from one forecast. Holds at most one open position per
 (sport, matchup, date) at a time -- the single best-edge bucket across
 every stat/player in that game, never a stack.
+
+A second, separate correlation this guard does NOT cover: two DIFFERENT
+games can independently produce a candidate priced into the exact same
+(sport, stat, side, decile) calibration bucket -- model_prob for both comes
+from that one bucket's single calibration_actual_rate, so they are not two
+independent bets, they are the same underlying signal bet twice. Real
+incident 2026-08-17: 4 of 6 real trades that day all drew on the identical
+(mlb, tb, yes, 10-20%) bucket and lost together, not four independent
+0.20-ish-probability draws. Guarded separately below (held_buckets) since
+it's orthogonal to the per-game guard -- two different games, same signal.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -39,12 +50,33 @@ from typing import Optional
 from src.trading.polymarket_us import sports_props_llm as llm
 from src.trading.polymarket_us.apex import risk
 from src.trading.polymarket_us.apex.memory import ApexMemory
+from src.trading.polymarket_us.bot import HELD_SLUGS_PATH as LADDER_HELD_SLUGS_PATH
+from src.trading.polymarket_us.nfl_prop_quote_logger import parse_nfl_prop_slug
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
-from src.trading.polymarket_us.sports_prop_calibration import SportsPropCalibrationEngine
+from src.trading.polymarket_us.sports_prop_calibration import SportsPropCalibrationEngine, _decile_low
 from src.trading.polymarket_us.sports_prop_quote_logger import parse_prop_slug
 from src.trading.polymarket_us.strategy import taker_fee_cents
 
 logger = logging.getLogger(__name__)
+
+# A bit more than the ladder bot's own 60s poll interval, to tolerate normal
+# scheduling jitter without falsely distrusting fresh data -- but tight
+# enough that a genuinely dead/stopped ladder bot is noticed rather than
+# trusted forever. Missing or stale falls back to the empty set (the older,
+# more cautious behavior), never to trusting data that might no longer be true.
+LADDER_HELD_SLUGS_STALE_SECS = 600
+
+
+def _ladder_bot_held_slugs() -> set[str]:
+    try:
+        raw = json.loads(LADDER_HELD_SLUGS_PATH.read_text(encoding="utf-8"))
+        updated = datetime.fromisoformat(raw["updated_ts"])
+        age = (datetime.now(timezone.utc) - updated).total_seconds()
+        if age > LADDER_HELD_SLUGS_STALE_SECS:
+            return set()
+        return set(raw.get("slugs", []))
+    except Exception:
+        return set()
 
 FILL_POLL_ATTEMPTS = 5
 FILL_POLL_DELAY = 1.0
@@ -65,11 +97,40 @@ def _model_prob(grounding) -> float:
     return (grounding.calibration_actual_rate or 0.0) / 100.0
 
 
-def _game_key(slug: str) -> Optional[tuple]:
+def _parse_any_prop_slug(slug: str) -> Optional[dict]:
+    """Tries every per-game-matchup sport family this bot trades: MLB (the
+    shared sports_prop_quote_logger.py) and NFL (its own dedicated module,
+    split out 2026-08-17 so NFL's per-game matchup props get their own data
+    file -- see nfl_prop_quote_logger.py's docstring for why only that one
+    NFL shape, out of three real ones, is tracked at all). Each parser
+    already rejects slugs outside its own sport, so trying both in sequence
+    is safe -- a slug can only ever match one."""
     meta = parse_prop_slug(slug)
+    if meta is not None:
+        return meta
+    return parse_nfl_prop_slug(slug)
+
+
+def _game_key(slug: str) -> Optional[tuple]:
+    meta = _parse_any_prop_slug(slug)
     if meta is None:
         return None
     return (meta["sport"], meta["matchup"], meta["date"])
+
+
+def _bucket_key(sport: str, stat: str, side: str, price_cents: int) -> tuple:
+    """Same decile grouping SportsPropCalibrationEngine itself uses to key
+    calibration_actual_rate -- two simultaneously open positions landing in
+    the same bucket are drawing on one shared measured win rate, not two
+    independent edges. See module docstring's Portfolio construction note."""
+    return (sport, stat, side, _decile_low(price_cents))
+
+
+def _trade_bucket_key(trade: dict) -> Optional[tuple]:
+    meta = _parse_any_prop_slug(trade["market_slug"])
+    if meta is None:
+        return None
+    return _bucket_key(meta["sport"], meta["stat"], trade["side"], trade["price_cents"])
 
 
 class SportsPropsBot:
@@ -146,7 +207,18 @@ class SportsPropsBot:
         """Same guard as apex/bot.py's, scoped to this bot's own market
         family. This account is shared with the ladder bot (astatc-*
         arbitrage locks) and Apex (tc-temp-* weather) -- their positions
-        are none of this bot's concern and must not trigger a halt here."""
+        are none of this bot's concern and must not trigger a halt here.
+        Apex is trivially excluded by slug prefix (tc-temp-* never matches
+        _game_key), but the ladder bot trades the SAME astatc-mlb-*/
+        astatc-nfl-* family this bot does -- slug shape alone can't tell
+        them apart, so the shared account's currently-held slugs, as
+        published every scan by the ladder bot's own routine position read
+        (see bot.py's HELD_SLUGS_PATH -- despite the name, covers anything
+        on the account, not just the ladder bot's own trades), are also
+        subtracted before anything is treated as stray. Real incident
+        2026-08-17: this exact gap halted the bot on 6 of the ladder bot's
+        own lock legs, confirmed after the fact via the exchange's own
+        manualOrderIndicator=AUTOMATIC on those fills."""
         try:
             live_positions = self.client.get_positions()
         except Exception as exc:
@@ -157,11 +229,19 @@ class SportsPropsBot:
             if abs(p.position) > FILL_EPSILON and _game_key(p.market_slug) is not None
         }
         tracked_slugs = {t["market_slug"] for t in self.memory.open_trades()}
+        ladder_slugs = _ladder_bot_held_slugs()
 
-        stray = live_slugs - tracked_slugs
+        stray = live_slugs - tracked_slugs - ladder_slugs
         if stray:
             self.memory.halt(
                 f"live account holds untracked sports-prop position(s) not in this bot's ledger: {sorted(stray)}"
+            )
+        attributed = (live_slugs - tracked_slugs) & ladder_slugs
+        if attributed:
+            logger.info(
+                "[sports_props] %d live position(s) excluded from the stray check -- "
+                "attributed to the ladder bot's own published holdings: %s",
+                len(attributed), sorted(attributed),
             )
 
         missing = tracked_slugs - live_slugs
@@ -321,7 +401,7 @@ class SportsPropsBot:
         for m in markets:
             if not m.slug.startswith("astatc-"):
                 continue
-            meta = parse_prop_slug(m.slug)
+            meta = _parse_any_prop_slug(m.slug)
             if meta is None:
                 continue
             key = (meta["sport"], meta["matchup"], meta["date"])
@@ -331,6 +411,10 @@ class SportsPropsBot:
             return
 
         held_games = {_game_key(t["market_slug"]) for t in self.memory.open_trades()}
+        held_buckets = {
+            k for k in (_trade_bucket_key(t) for t in self.memory.open_trades())
+            if k is not None
+        }
 
         try:
             balance_cents = self.client.get_balance()
@@ -373,6 +457,14 @@ class SportsPropsBot:
                 )
                 continue
 
+            bucket_key = _bucket_key(meta["sport"], meta["stat"], side, cost_price_cents)
+            if bucket_key in held_buckets:
+                logger.info(
+                    "[sports_props] PASS %s (%s side): already holding a position drawing on the same "
+                    "(sport, stat, side, decile) signal %s -- not an independent bet", slug, side, bucket_key,
+                )
+                continue
+
             model_prob_for_side = _model_prob(grounding)
             decision = risk.evaluate(
                 model_prob=model_prob_for_side, price_cents=cost_price_cents,
@@ -385,6 +477,11 @@ class SportsPropsBot:
 
             spent = self._place_decision(side, slug, meta, order_yes_price, cost_price_cents, model_prob_for_side, decision)
             cash_cents -= spent
+            if spent > 0:
+                # Same-cycle guard: a second, different game landing in this
+                # exact bucket later in this same loop must also be blocked,
+                # not just ones already open from a prior scan.
+                held_buckets.add(bucket_key)
             if self.memory.is_halted():
                 return
 
