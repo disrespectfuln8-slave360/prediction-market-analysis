@@ -32,4 +32,5 @@ output
 
 # Runtime logs
 *.log
+logs/
 
