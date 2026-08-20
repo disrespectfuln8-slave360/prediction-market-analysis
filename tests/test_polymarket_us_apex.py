@@ -342,6 +342,7 @@ def test_build_calibration_table_groups_and_scores_correctly():
     rows = [
         {
             "city": "nychigh",
+            "date": f"2026-08-{i + 1:02d}",
             "forecast_mu": 75.0,
             "forecast_sigma": 0.01,
             "low": 75.0,
@@ -353,6 +354,7 @@ def test_build_calibration_table_groups_and_scores_correctly():
     df = pd.DataFrame(rows)
     table = _build_calibration_table(df)
     assert table[("nychigh", 90)]["count"] == 30
+    assert table[("nychigh", 90)]["distinct_days"] == 30
     assert table[("nychigh", 90)]["actual_rate"] == pytest.approx(90.0)
     assert table[("nychigh", 90)]["mean_predicted"] > 99.0
 
@@ -367,6 +369,7 @@ def test_build_calibration_table_scopes_each_city_independently():
         [
             {
                 "city": "laxhigh",
+                "date": f"2026-08-{i + 1:02d}",
                 "forecast_mu": 75.0,
                 "forecast_sigma": 0.01,
                 "low": 75.0,
@@ -376,8 +379,16 @@ def test_build_calibration_table_scopes_each_city_independently():
             for i in range(30)
         ]  # LAX: 50% actual vs ~99% predicted -- bad
         + [
-            {"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0, "settlement": 1}
-            for _ in range(30)
+            {
+                "city": "nychigh",
+                "date": f"2026-08-{i + 1:02d}",
+                "forecast_mu": 75.0,
+                "forecast_sigma": 0.01,
+                "low": 75.0,
+                "high": 76.0,
+                "settlement": 1,
+            }
+            for i in range(30)
         ]  # NYC: 100% actual vs ~99% predicted -- fine
     )
     table = _build_calibration_table(pd.DataFrame(rows))
@@ -389,7 +400,12 @@ def test_trustworthiness_requires_the_sample_floor(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR - 1, "actual_rate": 90.0, "mean_predicted": 91.0}
+            ("nychigh", 90): {
+                "count": MIN_SAMPLE_FLOOR - 1,
+                "actual_rate": 90.0,
+                "mean_predicted": 91.0,
+                "distinct_days": MIN_SAMPLE_FLOOR - 1,
+            }
         }
         trustworthy, _note, count = engine._trustworthiness("nychigh", 0.95)
         assert not trustworthy
@@ -402,7 +418,12 @@ def test_trustworthiness_rejects_a_measured_miscalibration(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 60.0, "mean_predicted": 95.0},
+            ("nychigh", 90): {
+                "count": MIN_SAMPLE_FLOOR + 10,
+                "actual_rate": 60.0,
+                "mean_predicted": 95.0,
+                "distinct_days": MIN_SAMPLE_FLOOR + 10,
+            },
         }
         trustworthy, note, _count = engine._trustworthiness("nychigh", 0.95)
         assert not trustworthy
@@ -415,7 +436,12 @@ def test_trustworthiness_passes_a_well_calibrated_bucket(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 92.0, "mean_predicted": 94.0},
+            ("nychigh", 90): {
+                "count": MIN_SAMPLE_FLOOR + 10,
+                "actual_rate": 92.0,
+                "mean_predicted": 94.0,
+                "distinct_days": MIN_SAMPLE_FLOOR + 10,
+            },
         }
         trustworthy, _note, _count = engine._trustworthiness("nychigh", 0.95)
         assert trustworthy
@@ -431,8 +457,18 @@ def test_trustworthiness_is_scoped_independently_per_city(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
         engine._calibration = {
-            ("laxhigh", 60): {"count": MIN_SAMPLE_FLOOR + 62, "actual_rate": 46.2, "mean_predicted": 62.6},  # bad
-            ("nychigh", 60): {"count": MIN_SAMPLE_FLOOR + 5, "actual_rate": 64.0, "mean_predicted": 62.5},  # fine
+            ("laxhigh", 60): {
+                "count": MIN_SAMPLE_FLOOR + 62,
+                "actual_rate": 46.2,
+                "mean_predicted": 62.6,
+                "distinct_days": MIN_SAMPLE_FLOOR + 62,
+            },  # bad
+            ("nychigh", 60): {
+                "count": MIN_SAMPLE_FLOOR + 5,
+                "actual_rate": 64.0,
+                "mean_predicted": 62.5,
+                "distinct_days": MIN_SAMPLE_FLOOR + 5,
+            },  # fine
         }
         lax_trustworthy, _note, _count = engine._trustworthiness("laxhigh", 0.65)
         nyc_trustworthy, _note, _count = engine._trustworthiness("nychigh", 0.65)
@@ -454,7 +490,12 @@ def test_evaluate_bucket_checks_trustworthiness_independently_per_side(tmp_path)
         # 0-10% decile is well-calibrated; 90-100% (the NO side's real bet)
         # has no samples at all.
         engine._calibration = {
-            ("nychigh", 0): {"count": MIN_SAMPLE_FLOOR + 10, "actual_rate": 5.0, "mean_predicted": 5.0},
+            ("nychigh", 0): {
+                "count": MIN_SAMPLE_FLOOR + 10,
+                "actual_rate": 5.0,
+                "mean_predicted": 5.0,
+                "distinct_days": MIN_SAMPLE_FLOOR + 10,
+            },
         }
         date_str = engine._local_today("nychigh")
         engine._forecast_cache[("nychigh", date_str)] = {

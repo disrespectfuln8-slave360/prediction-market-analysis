@@ -130,15 +130,34 @@ def _build_calibration_table(history: pd.DataFrame) -> dict[tuple[str, int], dic
         mp = bucket_probability(row.forecast_mu, row.forecast_sigma, row.low, row.high)
         if mp is None:
             continue
-        rows.append({"city": row.city, "model_prob_pct": mp * 100.0, "settlement": int(row.settlement)})
+        rows.append(
+            {
+                "city": row.city,
+                "date": row.date,
+                "model_prob_pct": mp * 100.0,
+                "settlement": int(row.settlement),
+            }
+        )
     if not rows:
         return {}
     df = pd.DataFrame(rows)
     df["bucket_low"] = np.minimum(np.floor(df["model_prob_pct"] / 10.0) * 10.0, 90.0).astype(int)
+    # A single real day has one actual high temperature, but several adjacent
+    # 1-degree buckets for that day commonly land in the same probability
+    # decile (e.g. the 60-61, 61-62, 62-63 buckets all forecast around 15%),
+    # and their settlements are NOT independent -- at most one can ever be
+    # the true bucket, so the others are all correlated zeros from the same
+    # underlying draw. Real check 2026-08-20: 622 of 1390 (city, date,
+    # decile) groups had 2-8 rows, not 1. distinct_days counts real
+    # independent weather events (unique city+date); count keeps every raw
+    # bucket-row for actual_rate so no real observation is discarded, just
+    # not double-counted as independent evidence it isn't. Same fix, same
+    # reasoning, as sports_prop_calibration.py's distinct_games correction.
     grouped = df.groupby(["city", "bucket_low"]).agg(
         count=("settlement", "size"),
         wins=("settlement", "sum"),
         mean_predicted=("model_prob_pct", "mean"),
+        distinct_days=("date", "nunique"),
     )
     grouped["actual_rate"] = 100.0 * grouped["wins"] / grouped["count"]
     return {
@@ -146,6 +165,7 @@ def _build_calibration_table(history: pd.DataFrame) -> dict[tuple[str, int], dic
             "count": int(r["count"]),
             "actual_rate": float(r["actual_rate"]),
             "mean_predicted": float(r["mean_predicted"]),
+            "distinct_days": int(r["distinct_days"]),
         }
         for (city, bucket_low), r in grouped.iterrows()
     }
@@ -213,12 +233,14 @@ class WeatherGroundingEngine:
     def _trustworthiness(self, city: str, model_prob: float) -> tuple[bool, str, int]:
         bucket_low = _bucket_low_pct(model_prob)
         info = self._calibration.get((city, bucket_low))
-        if info is None or info["count"] < MIN_SAMPLE_FLOOR:
-            count = info["count"] if info else 0
+        if info is None or info["distinct_days"] < MIN_SAMPLE_FLOOR:
+            days = info["distinct_days"] if info else 0
+            raw = info["count"] if info else 0
             return (
                 False,
-                f"only {count} historical {city} sample(s) in the {bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})",
-                count,
+                f"only {days} distinct historical {city} day(s) ({raw} raw bucket-rows) in the "
+                f"{bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})",
+                days,
             )
         error = abs(info["actual_rate"] - info["mean_predicted"])
         if error > MAX_CALIBRATION_ERROR_PCT:
@@ -226,11 +248,16 @@ class WeatherGroundingEngine:
                 False,
                 (
                     f"{city} model measured {error:.1f}pp off actual in the {bucket_low}-{bucket_low + 10}% range "
-                    f"({info['count']} samples) — exceeds the {MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
+                    f"({info['distinct_days']} distinct days) — exceeds the {MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
                 ),
-                info["count"],
+                info["distinct_days"],
             )
-        return True, f"calibration OK: {info['count']} {city} samples, {error:.1f}pp measured error", info["count"]
+        return (
+            True,
+            f"calibration OK: {info['distinct_days']} distinct {city} days ({info['count']} raw bucket-rows), "
+            f"{error:.1f}pp measured error",
+            info["distinct_days"],
+        )
 
     # ── Live forecast ────────────────────────────────────────────────────────
 

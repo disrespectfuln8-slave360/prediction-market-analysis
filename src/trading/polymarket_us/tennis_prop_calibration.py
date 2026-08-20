@@ -93,32 +93,43 @@ def _build_calibration_table(quotes: list[dict], settlements: list[dict]) -> dic
 
     table: dict[str, dict[str, dict[int, dict]]] = {}
 
-    def _bucket(category: str, side: str, price: int, won: bool) -> None:
+    def _bucket(category: str, side: str, price: int, won: bool, match_key: tuple) -> None:
         cat = table.setdefault(category, {"yes": {}, "no": {}})
         decile = _decile_low(price)
-        d = cat[side].setdefault(decile, {"count": 0, "wins": 0})
+        d = cat[side].setdefault(decile, {"count": 0, "wins": 0, "matches": set()})
         d["count"] += 1
         d["wins"] += 1 if won else 0
+        d["matches"].add(match_key)
 
     for slug, s in settle_by_slug.items():
         category = s.get("category", "")
         outcome_yes = s.get("outcome_yes")
         if outcome_yes is None:
             continue
+        # A single match commonly spawns several threshold slugs in the same
+        # decile (e.g. game-totals lines at 21.5 and 22.5 both landing at
+        # 40c), and their outcomes are correlated -- they share the same
+        # real games played, not independent draws. Same fix, same
+        # reasoning, as sports_prop_calibration.py's distinct_games
+        # correction: count real distinct matches for the trustworthiness
+        # gate, keep every raw slug's outcome for actual_rate.
+        match_key = (s.get("matchup"), s.get("date"))
 
         ask = first_ask.get(slug)
         if ask is not None:
-            _bucket(category, "yes", ask, won=outcome_yes)
+            _bucket(category, "yes", ask, won=outcome_yes, match_key=match_key)
 
         bid = first_bid.get(slug)
         if bid is not None:
             no_price = 100 - bid
-            _bucket(category, "no", no_price, won=not outcome_yes)
+            _bucket(category, "no", no_price, won=not outcome_yes, match_key=match_key)
 
     for cat in table.values():
         for side_table in (cat["yes"], cat["no"]):
             for _decile, d in side_table.items():
                 d["actual_rate"] = 100.0 * d["wins"] / d["count"] if d["count"] else 0.0
+                d["distinct_matches"] = len(d["matches"])
+                del d["matches"]
 
     return table
 
@@ -164,15 +175,16 @@ class TennisPropCalibrationEngine:
         if cat is None:
             return False, f"no calibration data at all for {category}", 0, None
         info = cat[side].get(decile)
-        if info is None or info["count"] < MIN_SAMPLE_FLOOR:
-            count = info["count"] if info else 0
+        if info is None or info["distinct_matches"] < MIN_SAMPLE_FLOOR:
+            matches = info["distinct_matches"] if info else 0
+            raw = info["count"] if info else 0
             return (
                 False,
                 (
-                    f"only {count} historical {side} sample(s) in the {decile}-{decile + 10}% "
-                    f"range for {category} (need {MIN_SAMPLE_FLOOR})"
+                    f"only {matches} distinct historical {side} match(es) ({raw} raw samples) in the "
+                    f"{decile}-{decile + 10}% range for {category} (need {MIN_SAMPLE_FLOOR})"
                 ),
-                count,
+                matches,
                 (info["actual_rate"] if info else None),
             )
         midpoint = decile + 5
@@ -182,19 +194,19 @@ class TennisPropCalibrationEngine:
                 False,
                 (
                     f"{category} {side} measured {error:.1f}pp off the {decile}-{decile + 10}% "
-                    f"range's midpoint ({info['count']} samples) — exceeds the "
+                    f"range's midpoint ({info['distinct_matches']} distinct matches) — exceeds the "
                     f"{MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
                 ),
-                info["count"],
+                info["distinct_matches"],
                 info["actual_rate"],
             )
         return (
             True,
             (
-                f"calibration OK: {info['count']} samples, actual rate {info['actual_rate']:.1f}% "
-                f"in the {decile}-{decile + 10}% range"
+                f"calibration OK: {info['distinct_matches']} distinct matches ({info['count']} raw "
+                f"samples), actual rate {info['actual_rate']:.1f}% in the {decile}-{decile + 10}% range"
             ),
-            info["count"],
+            info["distinct_matches"],
             info["actual_rate"],
         )
 
