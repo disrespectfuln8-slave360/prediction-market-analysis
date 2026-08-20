@@ -93,6 +93,7 @@ the run is interrupted (best-effort cleanup in a finally).
 READ-ONLY on the polymarket.us API: only get_market and get_settlement are
 called. No order-placing method is imported, let alone called.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -104,7 +105,6 @@ import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import pandas as pd
@@ -138,12 +138,22 @@ OUT_DIR = Path("data/polymarket_us/weather_history")
 OUT_PATH = OUT_DIR / "weather_history.parquet"
 
 SCHEMA_COLUMNS = [
-    "city", "station", "date", "bucket_slug", "low", "high",
-    "settlement", "forecast_mu", "forecast_sigma", "forecast_cycle", "lead_hours",
+    "city",
+    "station",
+    "date",
+    "bucket_slug",
+    "low",
+    "high",
+    "settlement",
+    "forecast_mu",
+    "forecast_sigma",
+    "forecast_cycle",
+    "lead_hours",
 ]
 
 
 # ── polymarket.us bucket discovery ──────────────────────────────────────────
+
 
 def _mid_slug(city: str, d: str, n: int) -> str:
     return f"tc-temp-{city}-{d}-gte{n}lt{n + 1}f"
@@ -157,7 +167,7 @@ def _high_slug(city: str, d: str, n: int) -> str:
     return f"tc-temp-{city}-{d}-gte{n}f"
 
 
-def _probe(client: PolymarketUSTradingClient, slug: str) -> Optional[Market]:
+def _probe(client: PolymarketUSTradingClient, slug: str) -> Market | None:
     try:
         return client.get_market(slug)
     except httpx.HTTPStatusError as exc:
@@ -178,7 +188,7 @@ def _radius_candidates(center: int, lo: int, hi: int, step: int):
         r += step
 
 
-def _find_seed_n(client: PolymarketUSTradingClient, city: str, d: str, guess_n: Optional[int]):
+def _find_seed_n(client: PolymarketUSTradingClient, city: str, d: str, guess_n: int | None):
     """Find any one valid middle bucket for this city-day; return (n, Market) or (None, None)."""
     if guess_n is not None:
         for n in _radius_candidates(guess_n, BUCKET_LOW_F, BUCKET_HIGH_F - BUCKET_WIDTH, BUCKET_WIDTH):
@@ -195,7 +205,7 @@ def _find_seed_n(client: PolymarketUSTradingClient, city: str, d: str, guess_n: 
     return None, None
 
 
-def discover_day_buckets(client: PolymarketUSTradingClient, city: str, d: str, guess_n: Optional[int]):
+def discover_day_buckets(client: PolymarketUSTradingClient, city: str, d: str, guess_n: int | None):
     """Return (markets, next_guess_n) or None if no bucket could be found for this city-day."""
     n0, m0 = _find_seed_n(client, city, d, guess_n)
     if n0 is None:
@@ -245,7 +255,7 @@ def discover_day_buckets(client: PolymarketUSTradingClient, city: str, d: str, g
     return markets, n_min
 
 
-def _extract_settlement(payload: Optional[dict]) -> Optional[int]:
+def _extract_settlement(payload: dict | None) -> int | None:
     """0/1 winning-outcome flag from a /settlement response.
 
     Mirrors paper_client._settlement_to_cents's defensive shape-handling
@@ -269,6 +279,7 @@ def _extract_settlement(payload: Optional[dict]) -> Optional[int]:
 
 # ── Orchestration ────────────────────────────────────────────────────────────
 
+
 def _date_range(start: str, end_exclusive: date) -> list[str]:
     d = datetime.strptime(start, "%Y-%m-%d").date()
     out = []
@@ -285,9 +296,9 @@ def process_city_day(
     city: str,
     station: str,
     d: str,
-    guess_n: Optional[int],
+    guess_n: int | None,
     bucket_issues: Counter,
-) -> tuple[list[dict], Optional[int], str]:
+) -> tuple[list[dict], int | None, str]:
     """Returns (rows, next_guess_n, status) — status is "ok", "no_buckets",
     "no_forecast", or "no_resolved_buckets"."""
     discovery = discover_day_buckets(client, city, d, guess_n)
@@ -321,19 +332,21 @@ def process_city_day(
             continue
 
         low, high = bounds
-        rows.append({
-            "city": city,
-            "station": station,
-            "date": d,
-            "bucket_slug": m.slug,
-            "low": float(low) if low is not None else float("nan"),
-            "high": float(high) if high is not None else float("nan"),
-            "settlement": int(settlement),
-            "forecast_mu": forecast["forecast_mu"],
-            "forecast_sigma": forecast["forecast_sigma"],
-            "forecast_cycle": forecast["forecast_cycle"],
-            "lead_hours": forecast["lead_hours"],
-        })
+        rows.append(
+            {
+                "city": city,
+                "station": station,
+                "date": d,
+                "bucket_slug": m.slug,
+                "low": float(low) if low is not None else float("nan"),
+                "high": float(high) if high is not None else float("nan"),
+                "settlement": int(settlement),
+                "forecast_mu": forecast["forecast_mu"],
+                "forecast_sigma": forecast["forecast_sigma"],
+                "forecast_cycle": forecast["forecast_cycle"],
+                "lead_hours": forecast["lead_hours"],
+            }
+        )
 
     if not rows:
         return [], next_guess_n, "no_resolved_buckets"
@@ -373,7 +386,7 @@ def run_once() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
-    guess_n: dict[str, Optional[int]] = dict.fromkeys(CITY_STATIONS)
+    guess_n: dict[str, int | None] = dict.fromkeys(CITY_STATIONS)
     city_day_status: Counter = Counter()
     bucket_issues: Counter = Counter()
 
@@ -388,7 +401,14 @@ def run_once() -> None:
                     for city, (station, _tzname) in CITY_STATIONS.items():
                         try:
                             day_rows, guess_n[city], status = process_city_day(
-                                client, nbm_http, nbm_cache, city, station, d, guess_n[city], bucket_issues,
+                                client,
+                                nbm_http,
+                                nbm_cache,
+                                city,
+                                station,
+                                d,
+                                guess_n[city],
+                                bucket_issues,
                             )
                         except Exception as exc:
                             logger.error("Unexpected error on %s %s: %s", city, d, exc, exc_info=True)
@@ -452,20 +472,25 @@ def main():
     log_dir = Path(__file__).resolve().parents[1] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_dir / "backfill_weather_history.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "backfill_weather_history.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
         handlers=[file_handler, logging.StreamHandler()],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--loop", action="store_true",
+        "--loop",
+        action="store_true",
         help=f"Keep running, re-checking for newly-resolved days every {RELOOP_INTERVAL_SECS}s "
-             "instead of exiting after one pass",
+        "instead of exiting after one pass",
     )
     args = parser.parse_args()
 

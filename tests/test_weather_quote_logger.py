@@ -6,6 +6,7 @@ on the NWS Climatological Report (Daily). Slugs are deliberately NOT
 parsed: `lt76f` means <=75 while `gte76lt77f` includes 77, so slug
 arithmetic mis-bounds buckets.
 """
+
 from __future__ import annotations
 
 from src.trading.polymarket_us.weather_quote_logger import parse_bucket_bounds

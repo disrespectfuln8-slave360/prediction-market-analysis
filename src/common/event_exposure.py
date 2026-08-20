@@ -13,6 +13,7 @@ the same event).
 Caps total spend per event_key per calendar day (UTC), across every bot
 sharing this tracker. Resets automatically at day rollover.
 """
+
 from __future__ import annotations
 
 import threading

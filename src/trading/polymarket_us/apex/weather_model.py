@@ -15,6 +15,7 @@ in this repo (see strategy.py's note on the removed crypto/macro mispricing
 bots — subjective probability with no supporting data was tried here and
 didn't work), so Apex is deliberately scoped to only these markets for now.
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,7 +24,6 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import numpy as np
@@ -85,8 +85,8 @@ LIVE_SIGMA_SHRINKAGE = 0.87
 class BucketGrounding:
     city: str
     date: str
-    low: Optional[float]
-    high: Optional[float]
+    low: float | None
+    high: float | None
     model_prob: float
     forecast_mu: float
     forecast_sigma: float
@@ -161,8 +161,8 @@ class WeatherGroundingEngine:
         self.nbm_cache_dir = nbm_cache_dir
         self._nbm_http = httpx.Client(timeout=120.0, follow_redirects=True)
         self._calibration: dict[tuple[str, int], dict] = {}
-        self._history_max_date: Optional[str] = None
-        self._forecast_cache: dict[tuple, Optional[dict]] = {}  # (city, date) -> forecast dict or None
+        self._history_max_date: str | None = None
+        self._forecast_cache: dict[tuple, dict | None] = {}  # (city, date) -> forecast dict or None
         self._lock = threading.Lock()
         self.reload_calibration()
 
@@ -196,7 +196,9 @@ class WeatherGroundingEngine:
         self._history_max_date = str(history["date"].max()) if not history.empty else None
         logger.info(
             "[apex] Calibration table loaded: %d resolved rows across %d (city, decile) bucket(s), latest date %s",
-            len(history), len(self._calibration), self._history_max_date,
+            len(history),
+            len(self._calibration),
+            self._history_max_date,
         )
 
     def history_is_stale(self, today: str) -> bool:
@@ -213,13 +215,21 @@ class WeatherGroundingEngine:
         info = self._calibration.get((city, bucket_low))
         if info is None or info["count"] < MIN_SAMPLE_FLOOR:
             count = info["count"] if info else 0
-            return False, f"only {count} historical {city} sample(s) in the {bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})", count
+            return (
+                False,
+                f"only {count} historical {city} sample(s) in the {bucket_low}-{bucket_low + 10}% range (need {MIN_SAMPLE_FLOOR})",
+                count,
+            )
         error = abs(info["actual_rate"] - info["mean_predicted"])
         if error > MAX_CALIBRATION_ERROR_PCT:
-            return False, (
-                f"{city} model measured {error:.1f}pp off actual in the {bucket_low}-{bucket_low + 10}% range "
-                f"({info['count']} samples) — exceeds the {MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
-            ), info["count"]
+            return (
+                False,
+                (
+                    f"{city} model measured {error:.1f}pp off actual in the {bucket_low}-{bucket_low + 10}% range "
+                    f"({info['count']} samples) — exceeds the {MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
+                ),
+                info["count"],
+            )
         return True, f"calibration OK: {info['count']} {city} samples, {error:.1f}pp measured error", info["count"]
 
     # ── Live forecast ────────────────────────────────────────────────────────
@@ -227,7 +237,7 @@ class WeatherGroundingEngine:
     def _local_today(self, city: str) -> str:
         return local_today(city)
 
-    def forecast_for(self, city: str, date_str: str) -> Optional[dict]:
+    def forecast_for(self, city: str, date_str: str) -> dict | None:
         """NBM forecast for `city` on `date_str`, cached for the process
         lifetime — the cycle this repo picks (see nbm_forecast.py) is a fixed
         historical cycle by the time a market for that date is tradeable, so
@@ -238,7 +248,12 @@ class WeatherGroundingEngine:
                 return self._forecast_cache[key]
         raw_cache: dict = {}
         forecast = fetch_nbm_forecast(
-            self._nbm_http, raw_cache, city, date_str, CITY_STATIONS, self.nbm_cache_dir,
+            self._nbm_http,
+            raw_cache,
+            city,
+            date_str,
+            CITY_STATIONS,
+            self.nbm_cache_dir,
         )
         cleanup_nbm_cache(raw_cache)
         with self._lock:
@@ -249,7 +264,9 @@ class WeatherGroundingEngine:
 
     # ── Bucket discovery ─────────────────────────────────────────────────────
 
-    def discover_open_buckets(self, markets: list[Market]) -> dict[str, list[tuple[str, Optional[float], Optional[float], Market]]]:
+    def discover_open_buckets(
+        self, markets: list[Market]
+    ) -> dict[str, list[tuple[str, float | None, float | None, Market]]]:
         """Today's (per-city local date) open bucket markets, grouped by city.
         Each entry is (slug, low, high, Market)."""
         out: dict[str, list] = {}
@@ -268,7 +285,7 @@ class WeatherGroundingEngine:
                 out[city] = found
         return out
 
-    def evaluate_bucket(self, city: str, low: Optional[float], high: Optional[float]) -> Optional[BucketGrounding]:
+    def evaluate_bucket(self, city: str, low: float | None, high: float | None) -> BucketGrounding | None:
         date_str = self._local_today(city)
         forecast = self.forecast_for(city, date_str)
         if forecast is None:
@@ -283,10 +300,18 @@ class WeatherGroundingEngine:
         trustworthy, note, count = self._trustworthiness(city, mp)
         trustworthy_no, note_no, count_no = self._trustworthiness(city, 1.0 - mp)
         return BucketGrounding(
-            city=city, date=date_str, low=low, high=high, model_prob=mp,
-            forecast_mu=forecast["forecast_mu"], forecast_sigma=forecast["forecast_sigma"],
+            city=city,
+            date=date_str,
+            low=low,
+            high=high,
+            model_prob=mp,
+            forecast_mu=forecast["forecast_mu"],
+            forecast_sigma=forecast["forecast_sigma"],
             forecast_cycle=forecast["forecast_cycle"],
-            calibration_trustworthy=trustworthy, calibration_note=note, calibration_sample_count=count,
-            calibration_trustworthy_no=trustworthy_no, calibration_note_no=note_no,
+            calibration_trustworthy=trustworthy,
+            calibration_note=note,
+            calibration_sample_count=count,
+            calibration_trustworthy_no=trustworthy_no,
+            calibration_note_no=note_no,
             calibration_sample_count_no=count_no,
         )

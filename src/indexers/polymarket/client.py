@@ -57,7 +57,9 @@ class PolymarketClient:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 422:
                     logger.info(
-                        "Stopping pagination at offset=%d: %s", current_offset, exc.response.text,
+                        "Stopping pagination at offset=%d: %s",
+                        current_offset,
+                        exc.response.text,
                     )
                     yield [], -1
                     break

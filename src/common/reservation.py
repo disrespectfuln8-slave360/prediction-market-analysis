@@ -8,6 +8,7 @@ it before either thread's next snapshot would reveal the conflict. A shared
 TickerReservation closes that window: whichever thread reaches a ticker
 first wins it for the rest of that ticker's lifetime as a live bet.
 """
+
 from __future__ import annotations
 
 import threading

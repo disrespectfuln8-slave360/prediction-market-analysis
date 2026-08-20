@@ -12,14 +12,14 @@ so "side" here means "yes" (long — betting this outcome happens) or "no"
 (short — betting it doesn't), mirroring the same convention used throughout
 src/trading/kalshi/.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
-def _amount_to_cents(amount: Optional[dict]) -> Optional[int]:
+def _amount_to_cents(amount: dict | None) -> int | None:
     """Amount objects are {"value": "0.5500", "currency": "USD"} — dollars as
     a string, not cents. Convert once here so the rest of the codebase can
     keep using integer cents like the Kalshi/international-Polymarket clients."""
@@ -31,7 +31,7 @@ def _amount_to_cents(amount: Optional[dict]) -> Optional[int]:
         return None
 
 
-def _parse_time(val: Optional[str]) -> Optional[datetime]:
+def _parse_time(val: str | None) -> datetime | None:
     if not val:
         return None
     try:
@@ -40,7 +40,7 @@ def _parse_time(val: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _best_quotes(data: dict, bbo: Optional[dict]):
+def _best_quotes(data: dict, bbo: dict | None):
     """Return (yes_bid_cents, yes_ask_cents) from whichever source is freshest.
 
     Confirmed against the live API (the official SDK's TypedDicts don't
@@ -58,7 +58,7 @@ def _best_quotes(data: dict, bbo: Optional[dict]):
     return _amount_to_cents(data.get("bestBidQuote")), _amount_to_cents(data.get("bestAskQuote"))
 
 
-def _best_depths(bbo: Optional[dict]):
+def _best_depths(bbo: dict | None):
     """Return (bid_depth, ask_depth), or (None, None) when unknown.
 
     Only the /bbo endpoint carries these — the bulk /v1/markets records have
@@ -77,11 +77,13 @@ def _best_depths(bbo: Optional[dict]):
     if not bbo:
         return None, None
     md = bbo.get("marketData", bbo)
+
     def _as_int(v):
         try:
             return int(v)
         except (TypeError, ValueError):
             return None
+
     return _as_int(md.get("bidDepth")), _as_int(md.get("askDepth"))
 
 
@@ -94,18 +96,18 @@ class Market:
     tags: list
     active: bool
     closed: bool
-    close_time: Optional[datetime]  # from endDate
-    yes_bid: Optional[int]  # cents
-    yes_ask: Optional[int]
-    no_bid: Optional[int]
-    no_ask: Optional[int]
+    close_time: datetime | None  # from endDate
+    yes_bid: int | None  # cents
+    yes_ask: int | None
+    no_bid: int | None
+    no_ask: int | None
     volume: float
     volume_24h: float
-    bid_depth: Optional[int] = None  # only present when built with a /bbo record
-    ask_depth: Optional[int] = None
+    bid_depth: int | None = None  # only present when built with a /bbo record
+    ask_depth: int | None = None
 
     @classmethod
-    def from_dict(cls, data: dict, bbo: Optional[dict] = None) -> "Market":
+    def from_dict(cls, data: dict, bbo: dict | None = None) -> Market:
         """Build from a market record (list or single-slug fetch), optionally
         refined with a separately-fetched MarketBBO record."""
         yes_bid, yes_ask = _best_quotes(data, bbo)
@@ -138,7 +140,7 @@ class Position:
     position: float  # positive = net long (yes), negative = net short (no); shares/contracts
 
     @classmethod
-    def from_dict(cls, market_slug: str, data: dict) -> "Position":
+    def from_dict(cls, market_slug: str, data: dict) -> Position:
         # Confirmed against a live account: "netPosition" is an integer-
         # truncated string ("0", "2") while "netPositionDecimal" ("0.1600",
         # "2.4400") is the true fractional quantity — they silently diverge
@@ -163,7 +165,7 @@ class Order:
     status: str  # our normalized: "resting" or "filled" or the raw ORDER_STATE_* string
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Order":
+    def from_dict(cls, data: dict) -> Order:
         intent = data.get("intent", "")
         side = "yes" if "LONG" in intent else "no"
         state = data.get("state", "")

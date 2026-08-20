@@ -28,6 +28,7 @@ READ-ONLY: this module only ever calls list_all_markets/get_bbo. It must
 never place, cancel, or otherwise touch an order — the account it shares a
 client with is live and actively trading a separate strategy.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,6 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def local_today(city: str) -> str:
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
-def parse_bucket_bounds(title: str) -> Optional[tuple]:
+def parse_bucket_bounds(title: str) -> tuple | None:
     """(low, high) inclusive integer F bounds; None end = unbounded."""
     t = title.strip()
     m = _TITLE_BETWEEN.match(t)
@@ -112,8 +112,7 @@ class WeatherQuoteLogger:
                     continue
                 bounds = parse_bucket_bounds(m.title or "")
                 if bounds is None:
-                    logger.warning("Unparseable bucket title %r on %s — skipping",
-                                   m.title, m.slug)
+                    logger.warning("Unparseable bucket title %r on %s — skipping", m.title, m.slug)
                     continue
                 found.append((m.slug, bounds[0], bounds[1]))
             self._buckets[city] = found
@@ -146,19 +145,29 @@ class WeatherQuoteLogger:
                     v = (data.get(key) or {}).get("value")
                     return None if v is None else round(float(v) * 100)
 
-                self._write_row({
-                    "ts": now_iso, "city": city, "slug": slug,
-                    "low": low, "high": high,
-                    "bid": cents("bestBid"), "ask": cents("bestAsk"),
-                    "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
-                })
+                self._write_row(
+                    {
+                        "ts": now_iso,
+                        "city": city,
+                        "slug": slug,
+                        "low": low,
+                        "high": high,
+                        "bid": cents("bestBid"),
+                        "ask": cents("bestAsk"),
+                        "bid_depth": md.get("bidDepth"),
+                        "ask_depth": md.get("askDepth"),
+                    }
+                )
                 logged += 1
 
             logger.info("[%s] logged %d/%d buckets", city, logged, len(buckets))
 
     def run_forever(self, stop_event=None) -> None:
-        logger.info("Weather quote logger started — READ-ONLY, no orders will be placed. "
-                    "Cities: %s  poll=%ds", list(CITY_STATIONS), POLL_INTERVAL_SECS)
+        logger.info(
+            "Weather quote logger started — READ-ONLY, no orders will be placed. Cities: %s  poll=%ds",
+            list(CITY_STATIONS),
+            POLL_INTERVAL_SECS,
+        )
         while True:
             try:
                 self.run_cycle()
@@ -175,12 +184,15 @@ def main():
     from logging.handlers import RotatingFileHandler
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     log_dir = Path(__file__).resolve().parents[3] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "weather_quote_logger.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "weather_quote_logger.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
@@ -193,9 +205,11 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from src.common.single_instance import acquire_single_instance_lock
+
     _lock = acquire_single_instance_lock("weather_quote_logger")  # noqa: F841
 
     from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
+
     client = PolymarketUSTradingClient()
     try:
         WeatherQuoteLogger(client).run_forever()

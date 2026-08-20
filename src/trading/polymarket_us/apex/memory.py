@@ -28,6 +28,7 @@ says is necessary for anything trading this exchange unattended:
   halted (daily)    — the day's drawdown hit the circuit-breaker. Clears
                       automatically at the next UTC day boundary.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,6 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,9 @@ class ApexMemory:
         self.committed_cents = 0
         self.trade_log: list[dict] = []
         self.lessons: list[dict] = []
-        self.terminated_reason: Optional[str] = None
-        self.anomaly_halted_reason: Optional[str] = None
-        self.daily_halted_reason: Optional[str] = None
+        self.terminated_reason: str | None = None
+        self.anomaly_halted_reason: str | None = None
+        self.daily_halted_reason: str | None = None
         self.daily_start_bankroll_cents = starting_bankroll_cents
         self.daily_date = _today_utc()
         self._load()
@@ -189,7 +189,9 @@ class ApexMemory:
             if self.anomaly_halted_reason is not None:
                 logger.warning(
                     "[%s] Halt cleared: %s (was: %s)",
-                    self.label.lower(), note, self.anomaly_halted_reason,
+                    self.label.lower(),
+                    note,
+                    self.anomaly_halted_reason,
                 )
                 self.anomaly_halted_reason = None
                 self._save_locked()
@@ -233,7 +235,9 @@ class ApexMemory:
                     "dip from another live bot, not a real loss. Halting for today rather than "
                     "terminating; re-checked fresh every scan."
                 )
-                logger.warning("[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason)
+                logger.warning(
+                    "[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason
+                )
                 self._save_locked()
 
     # ── Trade lifecycle ──────────────────────────────────────────────────────
@@ -327,7 +331,7 @@ class ApexMemory:
     def open_trades(self) -> list[dict]:
         return [t for t in self.trade_log if t["status"] == "open"]
 
-    def record_settlement(self, trade_id: str, outcome_yes: bool, payout_cents: int) -> Optional[int]:
+    def record_settlement(self, trade_id: str, outcome_yes: bool, payout_cents: int) -> int | None:
         """Close out an open trade against its real resolution. Returns the
         realized P&L in cents, or None if trade_id wasn't found/already closed.
 
@@ -354,7 +358,7 @@ class ApexMemory:
             self._save_locked()
         return pnl_cents
 
-    def record_manual_close(self, trade_id: str, proceeds_cents: int) -> Optional[int]:
+    def record_manual_close(self, trade_id: str, proceeds_cents: int) -> int | None:
         """Close out an open trade that was closed OUTSIDE the bot — a human
         sold the position directly through the exchange's own interface.
         Apex has no sell/flatten logic of its own; _reconcile_live_positions()
@@ -402,7 +406,9 @@ class ApexMemory:
                 f"daily drawdown {drawdown * 100:.1f}% exceeds the "
                 f"{DAILY_DRAWDOWN_HALT_FRACTION * 100:.0f}% circuit breaker"
             )
-            logger.warning("[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason)
+            logger.warning(
+                "[%s] Trading halted for the rest of the day — %s", self.label.lower(), self.daily_halted_reason
+            )
 
     # ── Lessons / session recall ────────────────────────────────────────────
 
@@ -415,7 +421,7 @@ class ApexMemory:
         return [entry["text"] for entry in self.lessons[-n:]]
 
     def session_banner(self) -> str:
-        """"Begin every new session by stating current bankroll and summarizing
+        """ "Begin every new session by stating current bankroll and summarizing
         the previous day's key lessons" — rendered from real ledger state, not
         an LLM's recollection of one."""
         open_ct = len(self.open_trades())

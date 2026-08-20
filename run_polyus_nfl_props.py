@@ -29,6 +29,7 @@ Usage
 -----
     python run_polyus_nfl_props.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -45,7 +46,10 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _file_handler = RotatingFileHandler(
-    _LOG_DIR / "run_polyus_nfl_props.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    _LOG_DIR / "run_polyus_nfl_props.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 
 logging.basicConfig(
@@ -80,6 +84,7 @@ def make_polymarket_us_client():
     real = PolymarketUSTradingClient()
     if is_paper_mode("POLYMARKET_US_NFL_PROPS"):
         from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
         return PaperPolymarketUSTradingClient(real_client=real, ledger_path=NFL_PROPS_PAPER_LEDGER_PATH)
     return real
 
@@ -107,7 +112,9 @@ def main():
     client = make_polymarket_us_client()
     memory = make_nfl_props_memory()
     calibration = SportsPropCalibrationEngine(quotes_path=NFL_QUOTES_PATH, settlements_path=NFL_SETTLEMENTS_PATH)
-    bot = SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=300, allowed_sports=("nfl",))
+    bot = SportsPropsBot(
+        client=client, memory=memory, calibration=calibration, poll_interval=300, allowed_sports=("nfl",)
+    )
 
     logging.getLogger("launcher").info("NFL-props trading bot running. Ctrl+C to stop.")
     bot.run_forever(stop_event)

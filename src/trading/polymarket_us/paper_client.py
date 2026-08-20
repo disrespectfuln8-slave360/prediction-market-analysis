@@ -11,6 +11,7 @@ Positions are tracked per (market_slug, side) since Polymarket US models
 each market as a single long/short instrument, same as Kalshi's per-ticker
 yes/no model.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,6 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us.models import Market, Order, Position, _amount_to_cents
 from src.trading.polymarket_us.strategy import taker_fee_cents
@@ -34,7 +34,7 @@ RECONCILE_INTERVAL = 20.0  # seconds between settlement checks of open paper pos
 STUCK_LOG_INTERVAL = 600.0  # seconds between INFO logs about positions stuck awaiting settlement
 
 
-def _settlement_to_cents(payload: Optional[dict]) -> Optional[int]:
+def _settlement_to_cents(payload: dict | None) -> int | None:
     """Extract the settlement price in cents from a /settlement response.
 
     Observed live shape: {"slug": ..., "settlement": 1} — a bare number in
@@ -63,7 +63,7 @@ class PaperPolymarketUSTradingClient:
 
     def __init__(
         self,
-        real_client: Optional[PolymarketUSTradingClient] = None,
+        real_client: PolymarketUSTradingClient | None = None,
         ledger_path: Path = DEFAULT_LEDGER_PATH,
         starting_balance_cents: int = DEFAULT_STARTING_BALANCE_CENTS,
     ):
@@ -90,7 +90,8 @@ class PaperPolymarketUSTradingClient:
                 self._trade_log = raw.get("trade_log", [])
                 logger.info(
                     "[paper] Loaded ledger: cash=$%.2f  open_markets=%d",
-                    self._cash_cents / 100, len(self._positions),
+                    self._cash_cents / 100,
+                    len(self._positions),
                 )
             except Exception as exc:
                 logger.warning("[paper] Failed to load ledger, starting fresh: %s", exc)
@@ -99,11 +100,16 @@ class PaperPolymarketUSTradingClient:
         """Caller must hold self._lock."""
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.ledger_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({
-            "cash_cents": self._cash_cents,
-            "positions": self._positions,
-            "trade_log": self._trade_log[-500:],
-        }, indent=2))
+        tmp.write_text(
+            json.dumps(
+                {
+                    "cash_cents": self._cash_cents,
+                    "positions": self._positions,
+                    "trade_log": self._trade_log[-500:],
+                },
+                indent=2,
+            )
+        )
         os.replace(tmp, self.ledger_path)
 
     # ── Context manager / lifecycle ──────────────────────────────────────────
@@ -185,20 +191,35 @@ class PaperPolymarketUSTradingClient:
             leg = self._positions.setdefault(market_slug, {"yes": 0, "no": 0})
             leg[side] = leg.get(side, 0) + count
             order_id = f"paper-{uuid.uuid4().hex[:12]}"
-            self._trade_log.append({
-                "order_id": order_id, "market_slug": market_slug, "side": side,
-                "count": count, "price_cents": price_paid, "ts": time.time(),
-            })
+            self._trade_log.append(
+                {
+                    "order_id": order_id,
+                    "market_slug": market_slug,
+                    "side": side,
+                    "count": count,
+                    "price_cents": price_paid,
+                    "ts": time.time(),
+                }
+            )
             cash_now = self._cash_cents
             self._save_locked()
 
         logger.info(
             "[paper] FILLED %s %dx %s @ %d¢ (cost=%d¢, cash=$%.2f)",
-            side.upper(), count, market_slug, price_paid, cost, cash_now / 100,
+            side.upper(),
+            count,
+            market_slug,
+            price_paid,
+            cost,
+            cash_now / 100,
         )
         return Order(
-            order_id=order_id, market_slug=market_slug, side=side,
-            count=count, price_cents=yes_price, status="filled",
+            order_id=order_id,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status="filled",
         )
 
     def close_long(self, market_slug: str, count: int, price_cents: int) -> tuple:
@@ -215,16 +236,26 @@ class PaperPolymarketUSTradingClient:
             proceeds = sold * price_cents - taker_fee_cents(price_cents, sold)
             self._cash_cents += proceeds
             order_id = f"paper-{uuid.uuid4().hex[:12]}"
-            self._trade_log.append({
-                "order_id": order_id, "market_slug": market_slug, "side": "sell_long",
-                "count": sold, "price_cents": price_cents, "ts": time.time(),
-            })
+            self._trade_log.append(
+                {
+                    "order_id": order_id,
+                    "market_slug": market_slug,
+                    "side": "sell_long",
+                    "count": sold,
+                    "price_cents": price_cents,
+                    "ts": time.time(),
+                }
+            )
             cash_now = self._cash_cents
             self._save_locked()
 
         logger.info(
             "[paper] SOLD %dx %s @ %d¢ (proceeds=%d¢, cash=$%.2f)",
-            sold, market_slug, price_cents, proceeds, cash_now / 100,
+            sold,
+            market_slug,
+            price_cents,
+            proceeds,
+            cash_now / 100,
         )
         return order_id, sold
 
@@ -266,7 +297,8 @@ class PaperPolymarketUSTradingClient:
                 logger.warning(
                     "[paper] %s is closed but its settlement response has no usable "
                     "price (got %r) — position stays open, cannot free its slot",
-                    slug, settlement,
+                    slug,
+                    settlement,
                 )
                 continue
             result = "yes" if settlement_cents >= 50 else "no"
@@ -282,8 +314,12 @@ class PaperPolymarketUSTradingClient:
 
             logger.info(
                 "[paper] SETTLED %s -> %s  payout=+%d¢  (held yes=%d no=%d)  cash=$%.2f",
-                slug, result.upper(), payout,
-                legs.get("yes", 0), legs.get("no", 0), cash_now / 100,
+                slug,
+                result.upper(),
+                payout,
+                legs.get("yes", 0),
+                legs.get("no", 0),
+                cash_now / 100,
             )
 
         if stuck and (now - self._last_stuck_log) >= STUCK_LOG_INTERVAL:

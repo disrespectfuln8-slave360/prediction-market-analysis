@@ -11,6 +11,7 @@ call fails for any reason, a deterministic template renders the same fields
 from the same facts, so Apex runs end-to-end without ever requiring this
 credential.
 """
+
 from __future__ import annotations
 
 import json
@@ -59,8 +60,7 @@ def _template_rationale(context: dict) -> dict:
     return {
         "rationale": text,
         "residual_risks": (
-            "Forecast error, a late model update, or a resolution dispute could still "
-            "turn this into a loss."
+            "Forecast error, a late model update, or a resolution dispute could still turn this into a loss."
         ),
     }
 

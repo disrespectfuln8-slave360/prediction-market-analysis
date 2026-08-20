@@ -11,6 +11,7 @@ Uses an OS-level file lock (msvcrt on Windows, fcntl elsewhere) rather
 than a pidfile: the kernel releases the lock the instant the process dies,
 so there is no stale-lock state to detect or clean up after a crash.
 """
+
 from __future__ import annotations
 
 import os
@@ -38,9 +39,11 @@ def acquire_single_instance_lock(name: str):
         fh.seek(0)
         if os.name == "nt":
             import msvcrt
+
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         fh.close()

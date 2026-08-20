@@ -4,7 +4,6 @@ import base64
 import logging
 import os
 import time
-from typing import Optional
 
 from nacl.signing import SigningKey
 
@@ -57,8 +56,8 @@ class PolymarketUSTradingClient:
 
     def __init__(
         self,
-        key_id: Optional[str] = None,
-        secret_key: Optional[str] = None,
+        key_id: str | None = None,
+        secret_key: str | None = None,
         gateway_base_url: str = GATEWAY_BASE_URL,
         api_base_url: str = API_BASE_URL,
     ):
@@ -216,20 +215,14 @@ class PolymarketUSTradingClient:
             "type": "ORDER_TYPE_LIMIT",
             "price": {"value": f"{price_cents / 100:.2f}", "currency": "USD"},
             "quantity": count,
-            "tif": (
-                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if immediate_or_cancel
-                else "TIME_IN_FORCE_GOOD_TILL_CANCEL"
-            ),
+            "tif": ("TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if immediate_or_cancel else "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
         }
         data = self.order_http.post("/v1/orders", json=payload)
 
         filled = data.get("cumQuantity")
         if filled is None:
             executions = data.get("executions", []) or []
-            filled = (
-                sum(int(float(e.get("lastShares", 0) or 0)) for e in executions)
-                if executions else None
-            )
+            filled = sum(int(float(e.get("lastShares", 0) or 0)) for e in executions) if executions else None
 
         if filled is None:
             status = "unknown"

@@ -2,6 +2,7 @@
 Same testing philosophy as test_mlb_stats_verification.py -- network-calling
 functions verified live, pure logic unit-tested with fixture data.
 """
+
 from __future__ import annotations
 
 from src.trading.polymarket_us.nfl_stats_verification import real_stat_value, verify_settlement
@@ -23,6 +24,7 @@ def _athlete(name, stat_values):
 
 
 # ── real_stat_value: passing/receiving/rushing yards and passing TDs ───────
+
 
 def test_passing_yards_and_touchdowns():
     box = _boxscore(passing=[_athlete("Quinn Ewers", ["0", "27"])])
@@ -51,6 +53,7 @@ def test_missing_boxscore_returns_none():
 
 # ── real_stat_value: td (rushing + receiving, excluding passing TDs) ───────
 
+
 def test_td_sums_rushing_and_receiving_touchdowns():
     box = _boxscore(
         rushing=[_athlete("Jonah Coleman", ["10", "1"])],
@@ -73,10 +76,14 @@ def test_td_returns_none_when_the_player_never_appears_anywhere():
 
 def test_unrecognized_stat_key_returns_none():
     box = _boxscore(passing=[_athlete("Quinn Ewers", ["0", "27"])])
-    assert real_stat_value(box, "not_a_real_stat", "pyd") is None or real_stat_value(box, "Quinn Ewers", "not_a_real_stat") is None
+    assert (
+        real_stat_value(box, "not_a_real_stat", "pyd") is None
+        or real_stat_value(box, "Quinn Ewers", "not_a_real_stat") is None
+    )
 
 
 # ── verify_settlement: fallback behavior on failure ─────────────────────────
+
 
 class _RaisingClient:
     def get_market(self, slug):

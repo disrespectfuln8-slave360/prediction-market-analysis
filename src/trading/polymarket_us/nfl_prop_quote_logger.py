@@ -67,6 +67,7 @@ wired in regardless rather than assumed safe.
 
 READ-ONLY: only list_all_markets/get_bbo/get_settlement are ever called.
 """
+
 from __future__ import annotations
 
 import json
@@ -74,7 +75,6 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us import nfl_stats_verification
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
@@ -91,7 +91,7 @@ SETTLEMENTS_PATH = Path("data/polymarket_us/nfl_prop_settlements.jsonl")
 MAX_PENDING_CYCLES = 4 * 24 * 14
 
 
-def parse_nfl_prop_slug(slug: str) -> Optional[dict]:
+def parse_nfl_prop_slug(slug: str) -> dict | None:
     """(sport, matchup, date, stat, player, threshold) or None if `slug`
     isn't an NFL per-game matchup prop in the shape this logger tracks (see
     module docstring for the two other real NFL shapes this deliberately
@@ -147,7 +147,8 @@ class NflPropQuoteLogger:
                     self._have_bid.add(slug)
         logger.info(
             "Seeded capture state from disk: %d slugs with a known ask, %d with a known bid",
-            len(self._have_ask), len(self._have_bid),
+            len(self._have_ask),
+            len(self._have_bid),
         )
 
     # ── Discovery ────────────────────────────────────────────────────────────
@@ -170,7 +171,10 @@ class NflPropQuoteLogger:
         self._active = fresh
         logger.info(
             "Discovery: %d active buckets (%d new, %d closed since last scan), %d pending settlement",
-            len(fresh), len(newly_seen), len(closed_slugs), len(self._pending_settlement),
+            len(fresh),
+            len(newly_seen),
+            len(closed_slugs),
+            len(self._pending_settlement),
         )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -186,7 +190,8 @@ class NflPropQuoteLogger:
         now_iso = datetime.now(timezone.utc).isoformat()
         logged = 0
         pending = {
-            slug: meta for slug, meta in self._active.items()
+            slug: meta
+            for slug, meta in self._active.items()
             if slug not in self._have_ask or slug not in self._have_bid
         }
         for slug, meta in pending.items():
@@ -201,11 +206,18 @@ class NflPropQuoteLogger:
                 return None if v is None else round(float(v) * 100)
 
             bid, ask = cents("bestBid"), cents("bestAsk")
-            self._append(QUOTES_PATH, {
-                "ts": now_iso, "slug": slug, **meta,
-                "bid": bid, "ask": ask,
-                "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
-            })
+            self._append(
+                QUOTES_PATH,
+                {
+                    "ts": now_iso,
+                    "slug": slug,
+                    **meta,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_depth": md.get("bidDepth"),
+                    "ask_depth": md.get("askDepth"),
+                },
+            )
             logged += 1
             if ask is not None:
                 self._have_ask.add(slug)
@@ -213,7 +225,9 @@ class NflPropQuoteLogger:
                 self._have_bid.add(slug)
         logger.info(
             "Logged quotes for %d/%d active buckets needing them (%d already fully captured)",
-            logged, len(pending), len(self._active) - len(pending),
+            logged,
+            len(pending),
+            len(self._active) - len(pending),
         )
 
     def _check_settlements(self) -> None:
@@ -228,7 +242,8 @@ class NflPropQuoteLogger:
                     logger.warning(
                         "Giving up on settlement for %s after %d cycles unresolved -- "
                         "likely a dead/cancelled market, not a slow settlement",
-                        slug, cycles_waited + 1,
+                        slug,
+                        cycles_waited + 1,
                     )
                     dropped += 1
                     continue
@@ -250,20 +265,30 @@ class NflPropQuoteLogger:
                 logger.warning(
                     "Settlement CORRECTED for %s: exchange said outcome_yes=%s, verified against "
                     "the real ESPN box score says %s -- using the verified value",
-                    slug, outcome_yes, verified,
+                    slug,
+                    outcome_yes,
+                    verified,
                 )
                 outcome_yes = verified
 
-            self._append(SETTLEMENTS_PATH, {
-                "resolved_ts": datetime.now(timezone.utc).isoformat(),
-                "slug": slug, **meta,
-                "outcome_yes": outcome_yes,
-            })
+            self._append(
+                SETTLEMENTS_PATH,
+                {
+                    "resolved_ts": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug,
+                    **meta,
+                    "outcome_yes": outcome_yes,
+                },
+            )
             resolved += 1
         self._pending_settlement = still_pending
         if resolved or dropped:
-            logger.info("Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
-                        resolved, dropped, len(still_pending))
+            logger.info(
+                "Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
+                resolved,
+                dropped,
+                len(still_pending),
+            )
 
     def run_cycle(self) -> None:
         self._discover()
@@ -272,8 +297,8 @@ class NflPropQuoteLogger:
 
     def run_forever(self, stop_event=None) -> None:
         logger.info(
-            "NFL per-game prop quote logger started — READ-ONLY, no orders will be placed. "
-            "poll=%ds", POLL_INTERVAL_SECS,
+            "NFL per-game prop quote logger started — READ-ONLY, no orders will be placed. poll=%ds",
+            POLL_INTERVAL_SECS,
         )
         while True:
             try:
@@ -291,12 +316,15 @@ def main():
     from logging.handlers import RotatingFileHandler
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     log_dir = Path(__file__).resolve().parents[3] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "nfl_prop_quote_logger.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "nfl_prop_quote_logger.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
@@ -309,9 +337,11 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from src.common.single_instance import acquire_single_instance_lock
+
     _lock = acquire_single_instance_lock("nfl_prop_quote_logger")  # noqa: F841
 
     from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
+
     client = PolymarketUSTradingClient()
     try:
         NflPropQuoteLogger(client).run_forever()

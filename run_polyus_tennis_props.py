@@ -23,6 +23,7 @@ Usage
 -----
     python run_polyus_tennis_props.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -39,7 +40,10 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _file_handler = RotatingFileHandler(
-    _LOG_DIR / "run_polyus_tennis_props.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    _LOG_DIR / "run_polyus_tennis_props.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 
 logging.basicConfig(
@@ -72,12 +76,15 @@ def make_polymarket_us_client():
     real = PolymarketUSTradingClient()
     if is_paper_mode("POLYMARKET_US_TENNIS_PROPS"):
         from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
         return PaperPolymarketUSTradingClient(real_client=real, ledger_path=TENNIS_PROPS_PAPER_LEDGER_PATH)
     return real
 
 
 def make_tennis_props_memory() -> ApexMemory:
-    path = TENNIS_PROPS_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_TENNIS_PROPS") else TENNIS_PROPS_MEMORY_LIVE_PATH
+    path = (
+        TENNIS_PROPS_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_TENNIS_PROPS") else TENNIS_PROPS_MEMORY_LIVE_PATH
+    )
     return ApexMemory(path=path, label="tennis_props")
 
 

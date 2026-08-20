@@ -67,6 +67,7 @@ true by the time a second order needs the same liquidity. Rule 7: astatc-*
 pairs require the book to show depth well past what's actually being
 bought before trading at all — see SPORTS_PROP_DEPTH_MARGIN.
 """
+
 from __future__ import annotations
 
 import json
@@ -74,7 +75,6 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us.strategy import (
     DEFAULT_LOCK_BUDGET_CENTS,
@@ -191,7 +191,7 @@ class LadderArbBot:
         # many hedges fail in a row. Placing more locks while carrying unknown
         # directional risk compounds the problem, so the bot keeps scanning
         # and reporting but stops trading.
-        self._halted_reason: Optional[str] = None
+        self._halted_reason: str | None = None
         # (buy_slug, sell_slug) -> monotonic time the pair may be retried.
         self._cooldown: dict[tuple, float] = {}
         self._consecutive_failures = 0
@@ -239,7 +239,7 @@ class LadderArbBot:
 
     # ── Fresh quotes ─────────────────────────────────────────────────────────
 
-    def _requote(self, lock: LadderLock) -> Optional[tuple[int, int, int]]:
+    def _requote(self, lock: LadderLock) -> tuple[int, int, int] | None:
         """Re-price both legs against a fresh per-market BBO.
 
         Returns (buy_price, sell_price, max_contracts) if the edge still
@@ -256,8 +256,7 @@ class LadderArbBot:
             m1 = self.client.get_market(lock.buy_slug)
             m2 = self.client.get_market(lock.sell_slug)
         except Exception as exc:
-            logger.warning("Re-quote failed for %s / %s: %s",
-                           lock.buy_slug, lock.sell_slug, exc)
+            logger.warning("Re-quote failed for %s / %s: %s", lock.buy_slug, lock.sell_slug, exc)
             return None
 
         if m1.yes_ask is None or m2.yes_bid is None:
@@ -268,7 +267,9 @@ class LadderArbBot:
         if edge < MIN_EDGE_CENTS or edge > MAX_PLAUSIBLE_EDGE_CENTS:
             logger.info(
                 "Edge on %s gone at re-quote (scan +%dc -> live %+dc) — skipping",
-                lock.buy_slug, lock.edge_cents, edge,
+                lock.buy_slug,
+                lock.edge_cents,
+                edge,
             )
             return None
 
@@ -280,15 +281,16 @@ class LadderArbBot:
         if net < required:
             logger.info(
                 "Net edge on %s too thin at re-quote (%+dc after fees, need %+dc) — skipping",
-                lock.buy_slug, net, required,
+                lock.buy_slug,
+                net,
+                required,
             )
             return None
 
         depths = [d for d in (m1.ask_depth, m2.bid_depth) if d is not None]
         if len(depths) < 2:
             max_contracts = UNKNOWN_DEPTH_CONTRACTS
-            logger.debug("Depth unavailable for %s — capping at %d contract(s)",
-                         lock.buy_slug, max_contracts)
+            logger.debug("Depth unavailable for %s — capping at %d contract(s)", lock.buy_slug, max_contracts)
         else:
             max_contracts = min(depths)
             if lock.buy_slug.startswith(SPORTS_PROP_PREFIX) or lock.sell_slug.startswith(SPORTS_PROP_PREFIX):
@@ -296,12 +298,11 @@ class LadderArbBot:
                 # enough depth is not enough for a live sports book.
                 max_contracts //= SPORTS_PROP_DEPTH_MARGIN
         if max_contracts <= 0:
-            logger.info("No book depth on %s / %s — skipping",
-                        lock.buy_slug, lock.sell_slug)
+            logger.info("No book depth on %s / %s — skipping", lock.buy_slug, lock.sell_slug)
             return None
         return m1.yes_ask, m2.yes_bid, max_contracts
 
-    def _refresh_sell_quote(self, slug: str, fallback_price: int) -> tuple[int, Optional[float]]:
+    def _refresh_sell_quote(self, slug: str, fallback_price: int) -> tuple[int, float | None]:
         """Last look at the NO-side book, taken immediately before the NO leg
         is sent — not the sell_price/depth _requote() captured. Both are
         stale by the time they're spent: the YES leg still has to be placed
@@ -364,15 +365,17 @@ class LadderArbBot:
         cost_per_contract = buy_price + (100 - sell_price)
         count = min(budget_cents // cost_per_contract, lock.count, max_contracts)
         if count <= 0:
-            logger.debug("Re-quoted %s no longer fits the budget/book — skipping",
-                         lock.buy_slug)
+            logger.debug("Re-quoted %s no longer fits the budget/book — skipping", lock.buy_slug)
             return 0
 
         before_buy = self._net_position(lock.buy_slug)
         try:
             self.client.place_order(
-                market_slug=lock.buy_slug, side="yes",
-                count=count, yes_price=buy_price, immediate_or_cancel=True,
+                market_slug=lock.buy_slug,
+                side="yes",
+                count=count,
+                yes_price=buy_price,
+                immediate_or_cancel=True,
             )
         except Exception as exc:
             logger.warning("YES leg order rejected on %s: %s", lock.buy_slug, exc)
@@ -382,7 +385,8 @@ class LadderArbBot:
             if stray > 0:
                 logger.error(
                     "CRITICAL: YES leg on %s reported an error but left %s contracts",
-                    lock.buy_slug, stray,
+                    lock.buy_slug,
+                    stray,
                 )
                 if not self._flatten_long(lock.buy_slug, int(stray)):
                     self._halt(f"unflattened {stray}x long on {lock.buy_slug}")
@@ -397,8 +401,12 @@ class LadderArbBot:
             logger.info("YES leg on %s did not fill (IOC) — no position taken", lock.buy_slug)
             return 0
         if yes_filled < count:
-            logger.info("YES leg on %s partially filled %s/%d — hedging the real fill",
-                        lock.buy_slug, _fmt_qty(yes_filled), count)
+            logger.info(
+                "YES leg on %s partially filled %s/%d — hedging the real fill",
+                lock.buy_slug,
+                _fmt_qty(yes_filled),
+                count,
+            )
 
         spent = yes_filled * buy_price
 
@@ -407,7 +415,9 @@ class LadderArbBot:
         if fresh_sell_price != sell_price:
             logger.info(
                 "NO-side quote moved for %s between requote and placement: %dc -> %dc",
-                lock.sell_slug, sell_price, fresh_sell_price,
+                lock.sell_slug,
+                sell_price,
+                fresh_sell_price,
             )
         sell_price = fresh_sell_price
 
@@ -419,19 +429,22 @@ class LadderArbBot:
         # either miss (empty book) or hurt (adverse enough price).
         no_filled = 0.0
         if fresh_sell_depth is not None and fresh_sell_depth <= 0:
-            logger.info("NO-side book for %s emptied before placement — skipping the order",
-                        lock.sell_slug)
+            logger.info("NO-side book for %s emptied before placement — skipping the order", lock.sell_slug)
         elif buy_price + (100 - sell_price) >= 100:
             logger.info(
-                "NO-side price for %s moved too far to hedge profitably "
-                "(%dc + %dc >= 100c) — skipping the order",
-                lock.sell_slug, buy_price, 100 - sell_price,
+                "NO-side price for %s moved too far to hedge profitably (%dc + %dc >= 100c) — skipping the order",
+                lock.sell_slug,
+                buy_price,
+                100 - sell_price,
             )
         else:
             try:
                 self.client.place_order(
-                    market_slug=lock.sell_slug, side="no",
-                    count=yes_filled, yes_price=sell_price, immediate_or_cancel=True,
+                    market_slug=lock.sell_slug,
+                    side="no",
+                    count=yes_filled,
+                    yes_price=sell_price,
+                    immediate_or_cancel=True,
                 )
             except Exception as exc:
                 logger.error("NO leg order rejected on %s: %s", lock.sell_slug, exc)
@@ -445,9 +458,14 @@ class LadderArbBot:
         if unhedged <= FILL_EPSILON:
             logger.info(
                 "LOCK: %sx YES %s@%dc + %sx NO %s@%dc  edge=+%dc/ct gross, ~%+dc/ct net of fees  cost=$%.2f",
-                _fmt_qty(yes_filled), lock.buy_slug, buy_price,
-                _fmt_qty(no_filled), lock.sell_slug, 100 - sell_price,
-                sell_price - buy_price, net_edge_cents(buy_price, sell_price),
+                _fmt_qty(yes_filled),
+                lock.buy_slug,
+                buy_price,
+                _fmt_qty(no_filled),
+                lock.sell_slug,
+                100 - sell_price,
+                sell_price - buy_price,
+                net_edge_cents(buy_price, sell_price),
                 spent / 100,
             )
             self._consecutive_failures = 0
@@ -455,8 +473,11 @@ class LadderArbBot:
 
         logger.error(
             "NO leg on %s covered %s of %s — flattening %sx unhedged long on %s",
-            lock.sell_slug, _fmt_qty(max(0.0, no_filled)), _fmt_qty(yes_filled),
-            _fmt_qty(unhedged), lock.buy_slug,
+            lock.sell_slug,
+            _fmt_qty(max(0.0, no_filled)),
+            _fmt_qty(yes_filled),
+            _fmt_qty(unhedged),
+            lock.buy_slug,
         )
         # Unwinding costs the spread whether or not it succeeds, so this pair
         # has to stop being retried either way.
@@ -464,20 +485,18 @@ class LadderArbBot:
         if self._flatten_long(lock.buy_slug, unhedged):
             spent -= unhedged * buy_price  # recovered, roughly — exact P&L is in the balance
         else:
-            self._halt(
-                f"unhedged {_fmt_qty(unhedged)}x long on {lock.buy_slug} could not be flattened"
-            )
+            self._halt(f"unhedged {_fmt_qty(unhedged)}x long on {lock.buy_slug} could not be flattened")
         return max(0, spent)
 
     def _mark_failed(self, lock: LadderLock) -> None:
         """Cool a pair off, and halt if hedging keeps failing across pairs."""
-        self._cooldown[(lock.buy_slug, lock.sell_slug)] = (
-            time.monotonic() + FAILED_PAIR_COOLDOWN_SECS
-        )
+        self._cooldown[(lock.buy_slug, lock.sell_slug)] = time.monotonic() + FAILED_PAIR_COOLDOWN_SECS
         self._consecutive_failures += 1
         logger.info(
             "Cooling off %s / %s for %.0f min (%d consecutive hedge failures)",
-            lock.buy_slug, lock.sell_slug, FAILED_PAIR_COOLDOWN_SECS / 60,
+            lock.buy_slug,
+            lock.sell_slug,
+            FAILED_PAIR_COOLDOWN_SECS / 60,
             self._consecutive_failures,
         )
         if self._consecutive_failures >= MAX_CONSECUTIVE_HEDGE_FAILURES:
@@ -495,18 +514,17 @@ class LadderArbBot:
         logger.error(
             "CRITICAL: trading halted — %s. The account is carrying directional "
             "risk this strategy is not supposed to take. Flatten it by hand, then "
-            "restart the bot.", reason,
+            "restart the bot.",
+            reason,
         )
 
     def _halt_low_balance(self, balance_cents: int) -> None:
-        self._halted_reason = (
-            f"balance ${balance_cents / 100:.2f} at or below the "
-            f"${MIN_BALANCE_CENTS / 100:.2f} floor"
-        )
+        self._halted_reason = f"balance ${balance_cents / 100:.2f} at or below the ${MIN_BALANCE_CENTS / 100:.2f} floor"
         logger.error(
             "CRITICAL: trading halted — balance $%.2f is at or below the $%.2f "
             "floor. Re-fund the account and restart the bot to resume.",
-            balance_cents / 100, MIN_BALANCE_CENTS / 100,
+            balance_cents / 100,
+            MIN_BALANCE_CENTS / 100,
         )
 
     # ── Scan loop ────────────────────────────────────────────────────────────
@@ -538,10 +556,14 @@ class LadderArbBot:
         locks = find_ladder_locks(markets, held, budget_cents=budget)
 
         logger.info(
-            "[%s] markets=%d  ladder_locks_found=%d  open_legs=%d  slots=%d  "
-            "balance=$%.2f  budget=$%.2f%s",
-            datetime.now().strftime("%H:%M:%S"), len(markets), len(locks),
-            open_legs, slots, balance / 100, budget / 100,
+            "[%s] markets=%d  ladder_locks_found=%d  open_legs=%d  slots=%d  balance=$%.2f  budget=$%.2f%s",
+            datetime.now().strftime("%H:%M:%S"),
+            len(markets),
+            len(locks),
+            open_legs,
+            slots,
+            balance / 100,
+            budget / 100,
             "  HALTED" if self._halted_reason else "",
         )
 
@@ -554,13 +576,14 @@ class LadderArbBot:
         remaining = budget
         for lock in locks[:slots]:
             if self._in_cooldown(lock):
-                logger.debug("Skipping %s / %s — cooling off after a failed hedge",
-                             lock.buy_slug, lock.sell_slug)
+                logger.debug("Skipping %s / %s — cooling off after a failed hedge", lock.buy_slug, lock.sell_slug)
                 continue
             if lock.total_cost_cents > remaining:
                 logger.debug(
                     "Skipping lock on %s — cost $%.2f exceeds remaining budget $%.2f",
-                    lock.buy_slug, lock.total_cost_cents / 100, remaining / 100,
+                    lock.buy_slug,
+                    lock.total_cost_cents / 100,
+                    remaining / 100,
                 )
                 continue
             remaining -= self._place_lock(lock, remaining)

@@ -25,6 +25,7 @@ Usage: python -m scripts.check_apex_sigma_calibration
 (run from the repo root; see scripts/backfill_weather_history.py's own
 docstring for why -- this needs `src` on the import path.)
 """
+
 from __future__ import annotations
 
 import logging
@@ -76,7 +77,14 @@ def run_once() -> None:
 
     logger.info(
         "Full history: n=%d mean(z)=%+.3f std(z)=%.3f  |  Trailing %dd: n=%d mean(z)=%+.3f std(z)=%.3f  |  current LIVE_SIGMA_SHRINKAGE=%.2f",
-        full_n, full_mean, full_std, TRAILING_WINDOW_DAYS, trail_n, trail_mean, trail_std, LIVE_SIGMA_SHRINKAGE,
+        full_n,
+        full_mean,
+        full_std,
+        TRAILING_WINDOW_DAYS,
+        trail_n,
+        trail_mean,
+        trail_std,
+        LIVE_SIGMA_SHRINKAGE,
     )
 
     if trail_n < 20:
@@ -94,7 +102,8 @@ def run_once() -> None:
         logger.warning(
             "Trailing std(z)=%.3f is still notably tighter than the full-history std(z)=%.3f -- the "
             "recent-regime effect looks like it's persisting, not resolving.",
-            trail_std, full_std,
+            trail_std,
+            full_std,
         )
     else:
         logger.info("Trailing std(z)=%.3f -- no strong signal either way yet.", trail_std)
@@ -107,11 +116,15 @@ def main():
     log_dir = Path(__file__).resolve().parents[1] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_dir / "check_apex_sigma_calibration.log", maxBytes=2 * 1024 * 1024, backupCount=2,
+        log_dir / "check_apex_sigma_calibration.log",
+        maxBytes=2 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[file_handler, logging.StreamHandler()],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -120,6 +133,7 @@ def main():
     # not whatever was on disk from the last unrelated backfill run.
     try:
         from scripts.backfill_weather_history import run_once as refresh_history
+
         refresh_history()
     except Exception as exc:
         logger.warning("Backfill refresh failed (%s) -- checking against whatever's already on disk.", exc)

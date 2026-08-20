@@ -58,5 +58,15 @@ ignore = [
     "E501",   # line too long (handled by formatter)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# These launchers deliberately load_dotenv() and configure logging before
+# importing project modules -- several read env vars or log at import time,
+# so the ordering is load-order-dependent, not an oversight.
+"run_polyus.py" = ["E402"]
+"run_polyus_apex.py" = ["E402"]
+"run_polyus_nfl_props.py" = ["E402"]
+"run_polyus_sports_props.py" = ["E402"]
+"run_polyus_tennis_props.py" = ["E402"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

@@ -47,6 +47,7 @@ The 00Z valid-hour rule holds regardless of the cycle's own hour (verified
 against both a 12Z and a 13Z cycle file), so no per-cycle special-casing is
 needed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -55,7 +56,6 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -173,7 +173,7 @@ def _select_tx(fhr_vals, txn_vals, xnd_vals, cycle_utc: datetime, tz: ZoneInfo, 
     return None
 
 
-def _get_or_download_cycle(nbm_http: httpx.Client, cache: dict, cycle_utc: datetime, cache_dir: Path) -> Optional[Path]:
+def _get_or_download_cycle(nbm_http: httpx.Client, cache: dict, cycle_utc: datetime, cache_dir: Path) -> Path | None:
     key = _nbm_cache_key(cycle_utc)
     if key in cache:
         return cache[key]  # may be None if this cycle already failed today
@@ -194,7 +194,7 @@ def fetch_nbm_forecast(
     d: str,
     city_stations: dict,
     cache_dir: Path,
-) -> Optional[dict]:
+) -> dict | None:
     """(forecast_mu, forecast_sigma, forecast_cycle, lead_hours) for `city` on date `d`
     ("YYYY-MM-DD"), or None if the bulletin couldn't be fetched/parsed.
 
@@ -266,7 +266,7 @@ def _is_unbounded(x) -> bool:
         return False
 
 
-def bucket_probability(mu: float, sigma: Optional[float], low: Optional[float], high: Optional[float]) -> Optional[float]:
+def bucket_probability(mu: float, sigma: float | None, low: float | None, high: float | None) -> float | None:
     """P(low <= actual_high <= high) under Normal(mu, sigma), scalar version of the
     same continuity-corrected model used by
     src/analysis/polymarket_us/weather_forecast_calibration.py._add_model_prob

@@ -5,11 +5,10 @@ nfl_prop_quote_logger.py's module docstring for why NFL got its own module
 and data files, and why only the per-game matchup shape (of three real NFL
 shapes surveyed) is tracked at all.
 """
+
 from __future__ import annotations
 
 import json
-
-import pytest
 
 from src.trading.polymarket_us.models import Market
 from src.trading.polymarket_us.nfl_prop_quote_logger import (
@@ -20,20 +19,37 @@ from src.trading.polymarket_us.nfl_prop_quote_logger import (
 
 def make_market(slug):
     return Market(
-        slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=True, closed=False, close_time=None,
-        yes_bid=50, yes_ask=52, no_bid=48, no_ask=50,
-        volume=0.0, volume_24h=0.0, bid_depth=10, ask_depth=10,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="sports",
+        tags=[],
+        active=True,
+        closed=False,
+        close_time=None,
+        yes_bid=50,
+        yes_ask=52,
+        no_bid=48,
+        no_ask=50,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=10,
+        ask_depth=10,
     )
 
 
 # ── Slug parsing ─────────────────────────────────────────────────────────────
 
+
 def test_parses_nfl_touchdown_prop():
     meta = parse_nfl_prop_slug("astatc-nfl-lac-hou-2026-08-13-td-trelan-gte1")
     assert meta == {
-        "sport": "nfl", "matchup": "lac-hou", "date": "2026-08-13",
-        "stat": "td", "player": "trelan", "threshold": 1,
+        "sport": "nfl",
+        "matchup": "lac-hou",
+        "date": "2026-08-13",
+        "stat": "td",
+        "player": "trelan",
+        "threshold": 1,
     }
 
 
@@ -42,8 +58,12 @@ def test_parses_real_preseason_slug_shapes():
     collection -- confirms the shape this module inherited still parses."""
     meta = parse_nfl_prop_slug("astatc-nfl-tb-nyj-2026-08-14-pyd-gensmi-gte50")
     assert meta == {
-        "sport": "nfl", "matchup": "tb-nyj", "date": "2026-08-14",
-        "stat": "pyd", "player": "gensmi", "threshold": 50,
+        "sport": "nfl",
+        "matchup": "tb-nyj",
+        "date": "2026-08-14",
+        "stat": "pyd",
+        "player": "gensmi",
+        "threshold": 50,
     }
 
 
@@ -65,6 +85,7 @@ def test_rejects_non_astatc_slugs():
 
 
 # ── Logger state machine ─────────────────────────────────────────────────────
+
 
 class FakeClient:
     def __init__(self, markets, bbo=None, settlements=None, settlement_errors=()):
@@ -104,15 +125,22 @@ def test_quotes_are_logged_with_parsed_metadata(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.15"}, "bestAsk": {"value": "0.18"},
-            "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.15"},
+                    "bestAsk": {"value": "0.18"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = NflPropQuoteLogger(client)
     logger_.run_cycle()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import QUOTES_PATH
+
     rows = [json.loads(line) for line in QUOTES_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -128,9 +156,16 @@ def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.15"}, "bestAsk": {"value": "0.18"}, "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.15"},
+                    "bestAsk": {"value": "0.18"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = NflPropQuoteLogger(client)
     logger_._active = {SLUG: parse_nfl_prop_slug(SLUG)}
@@ -146,6 +181,7 @@ def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatc
 def test_capture_state_is_seeded_from_disk_on_startup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.trading.polymarket_us.nfl_prop_quote_logger import QUOTES_PATH
+
     QUOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     QUOTES_PATH.write_text(json.dumps({"slug": SLUG, "bid": 15, "ask": 18}) + "\n")
 
@@ -184,6 +220,7 @@ def test_resolved_settlement_is_logged_and_cleared_from_pending(tmp_path, monkey
     logger_._check_settlements()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -196,6 +233,7 @@ def test_resolved_settlement_is_logged_and_cleared_from_pending(tmp_path, monkey
 # tests for the fuller rationale). NFL's own spot-check came back clean, but
 # the override plumbing itself is tested here regardless.
 
+
 def test_settlement_verification_overrides_a_wrong_exchange_settlement(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
@@ -207,6 +245,7 @@ def test_settlement_verification_overrides_a_wrong_exchange_settlement(tmp_path,
     logger_._check_settlements()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is False
 
@@ -222,14 +261,17 @@ def test_settlement_verification_inconclusive_falls_back_to_the_exchange_value(t
     logger_._check_settlements()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is True
 
 
 def test_settlement_verification_raising_falls_back_to_the_exchange_value(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+
     def _boom(*a, **k):
         raise RuntimeError("ESPN is down")
+
     client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
     logger_ = NflPropQuoteLogger(client, verify_settlement_fn=_boom)
     logger_._discover()
@@ -239,6 +281,7 @@ def test_settlement_verification_raising_falls_back_to_the_exchange_value(tmp_pa
     logger_._check_settlements()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is True
 
@@ -255,5 +298,6 @@ def test_unsettled_bucket_stays_pending_without_writing_a_row(tmp_path, monkeypa
     logger_._check_settlements()
 
     from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH
+
     assert not SETTLEMENTS_PATH.exists()
     assert SLUG in logger_._pending_settlement

@@ -22,10 +22,10 @@ rules the system prompt specifies, enforced in code:
     negligible size (thin depth, a near-worthless longshot price, a cash
     reserve squeeze) isn't worth a real order's fee and ledger footprint.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from src.trading.polymarket_us.strategy import taker_fee_cents
 
@@ -97,7 +97,7 @@ def evaluate(
     price_cents: int,
     bankroll_cents: int,
     cash_cents: int,
-    max_contracts: Optional[float] = None,
+    max_contracts: float | None = None,
 ) -> ApexDecision:
     """Full pipeline: edge check -> Kelly sizing -> caps -> cash-reserve gate
     -> liquidity cap. Returns a PASS decision with a reason at the first
@@ -107,7 +107,12 @@ def evaluate(
 
     if not (MIN_TRADEABLE_PRICE_CENTS <= price_cents <= MAX_TRADEABLE_PRICE_CENTS):
         return ApexDecision(
-            "pass", 0.0, 0.0, 0.0, 0, 0.0,
+            "pass",
+            0.0,
+            0.0,
+            0.0,
+            0,
+            0.0,
             f"price {price_cents}c outside the {MIN_TRADEABLE_PRICE_CENTS}-{MAX_TRADEABLE_PRICE_CENTS}c "
             "moderate-probability range -- no longshot bets",
         )
@@ -115,7 +120,12 @@ def evaluate(
     edge = edge_fraction(model_prob, price_cents)
     if edge < MIN_EDGE_FRACTION:
         return ApexDecision(
-            "pass", edge, 0.0, 0.0, 0, 0.0,
+            "pass",
+            edge,
+            0.0,
+            0.0,
+            0,
+            0.0,
             f"edge {edge:+.1%} below the {MIN_EDGE_FRACTION:.0%} floor after fees",
         )
 
@@ -124,7 +134,12 @@ def evaluate(
     kelly_used = min(kelly_raw * MAX_KELLY_FRACTION, MAX_POSITION_FRACTION)
     if kelly_used <= 0 or bankroll_cents <= 0:
         return ApexDecision(
-            "pass", edge, kelly_raw, 0.0, 0, 0.0,
+            "pass",
+            edge,
+            kelly_raw,
+            0.0,
+            0,
+            0.0,
             "no positive sizeable Kelly fraction despite a passing edge",
         )
 
@@ -140,7 +155,12 @@ def evaluate(
 
     if stake_cents <= 0:
         return ApexDecision(
-            "pass", edge, kelly_raw, kelly_used, 0, 0.0,
+            "pass",
+            edge,
+            kelly_raw,
+            kelly_used,
+            0,
+            0.0,
             "sized to zero after the cash-reserve constraint",
         )
 
@@ -151,13 +171,23 @@ def evaluate(
 
     if count <= 0 or stake_cents <= 0:
         return ApexDecision(
-            "pass", edge, kelly_raw, kelly_used, 0, 0.0,
+            "pass",
+            edge,
+            kelly_raw,
+            kelly_used,
+            0,
+            0.0,
             "no book depth available to fill any size",
         )
 
     if stake_cents < MIN_STAKE_CENTS:
         return ApexDecision(
-            "pass", edge, kelly_raw, kelly_used, 0, 0.0,
+            "pass",
+            edge,
+            kelly_raw,
+            kelly_used,
+            0,
+            0.0,
             f"stake {stake_cents}c below the {MIN_STAKE_CENTS}c minimum viable size",
         )
 

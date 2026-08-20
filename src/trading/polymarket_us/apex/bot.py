@@ -34,12 +34,12 @@ Same-city, same-day bucket markets are draws from the same forecast, so
 they are highly correlated. Apex holds at most one open position per
 (city, local-date) at a time -- the single best-edge bucket, never a stack.
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 from src.trading.polymarket_us.apex import llm, risk
 from src.trading.polymarket_us.apex.memory import ApexMemory
@@ -68,7 +68,7 @@ def _fmt_qty(x: float) -> str:
     return f"{x:g}"
 
 
-def _city_from_slug(slug: str) -> Optional[str]:
+def _city_from_slug(slug: str) -> str | None:
     parts = slug.split("-")
     if len(parts) >= 3 and parts[0] == "tc" and parts[1] == "temp":
         return parts[2]
@@ -79,8 +79,8 @@ class ApexBot:
     def __init__(
         self,
         client,
-        memory: Optional[ApexMemory] = None,
-        grounding: Optional[WeatherGroundingEngine] = None,
+        memory: ApexMemory | None = None,
+        grounding: WeatherGroundingEngine | None = None,
         poll_interval: int = 300,
     ):
         self.client = client
@@ -133,8 +133,12 @@ class ApexBot:
             pnl_cents = self.memory.record_settlement(trade["id"], outcome_yes, payout_cents)
             logger.info(
                 "[apex] SETTLED %s -> %s  %sx %s  pnl=%+d¢  bankroll=$%.2f",
-                slug, "YES" if outcome_yes else "NO", _fmt_qty(trade["count"]), trade["side"].upper(),
-                pnl_cents or 0, self.memory.bankroll_cents / 100,
+                slug,
+                "YES" if outcome_yes else "NO",
+                _fmt_qty(trade["count"]),
+                trade["side"].upper(),
+                pnl_cents or 0,
+                self.memory.bankroll_cents / 100,
             )
             miss = abs(trade["model_prob"] - (1.0 if won else 0.0))
             if miss >= 0.5 and (pnl_cents or 0) < 0:
@@ -163,27 +167,27 @@ class ApexBot:
         # live positions (e.g. the sibling ladder bot's) that are none of
         # Apex's concern and must not trigger a halt here.
         live_slugs = {
-            p.market_slug for p in live_positions
+            p.market_slug
+            for p in live_positions
             if abs(p.position) > FILL_EPSILON and _city_from_slug(p.market_slug) is not None
         }
         tracked_slugs = {t["market_slug"] for t in self.memory.open_trades()}
 
         stray = live_slugs - tracked_slugs
         if stray:
-            self.memory.halt(
-                f"live account holds untracked weather position(s) not in Apex's ledger: {sorted(stray)}"
-            )
+            self.memory.halt(f"live account holds untracked weather position(s) not in Apex's ledger: {sorted(stray)}")
 
         missing = tracked_slugs - live_slugs
         if missing:
             logger.warning(
                 "[apex] memory shows open position(s) the live account no longer holds: %s "
-                "(may be a settlement not yet reconciled)", sorted(missing),
+                "(may be a settlement not yet reconciled)",
+                sorted(missing),
             )
 
     # ── Bucket selection ─────────────────────────────────────────────────────
 
-    def _best_bucket_for_city(self, city: str, buckets: list) -> Optional[tuple]:
+    def _best_bucket_for_city(self, city: str, buckets: list) -> tuple | None:
         """Highest-edge tradeable bucket in one city-day, or None. Priced off
         the bulk scan's quotes as a coarse filter -- the caller re-quotes the
         chosen candidate against a fresh per-market BBO before sizing, since
@@ -210,7 +214,7 @@ class ApexBot:
                     best = (edge, "no", slug, grounding)
         return best
 
-    def _requote_bucket(self, slug: str, side: str) -> Optional[tuple]:
+    def _requote_bucket(self, slug: str, side: str) -> tuple | None:
         """(cost_price_cents, order_yes_price, depth) against a fresh BBO, or
         None if the side is unquoted. cost_price_cents is what a contract on
         this side actually costs (used for risk/edge math and display);
@@ -235,8 +239,13 @@ class ApexBot:
     # ── Order placement ──────────────────────────────────────────────────────
 
     def _place_decision(
-        self, side: str, slug: str, order_yes_price: int, cost_price_cents: int,
-        grounding, decision: risk.ApexDecision,
+        self,
+        side: str,
+        slug: str,
+        order_yes_price: int,
+        cost_price_cents: int,
+        grounding,
+        decision: risk.ApexDecision,
     ) -> int:
         """Returns the cents actually spent (0 if nothing filled), so the
         caller can track its own per-scan budget against real spend rather
@@ -247,8 +256,11 @@ class ApexBot:
         before = self._net_position(slug)
         try:
             self.client.place_order(
-                market_slug=slug, side=side,
-                count=decision.count, yes_price=order_yes_price, immediate_or_cancel=True,
+                market_slug=slug,
+                side=side,
+                count=decision.count,
+                yes_price=order_yes_price,
+                immediate_or_cancel=True,
             )
         except Exception as exc:
             logger.warning("[apex] %s order rejected on %s: %s", side.upper(), slug, exc)
@@ -264,7 +276,9 @@ class ApexBot:
                 return 0
             logger.error(
                 "[apex] CRITICAL: %s order on %s reported an error but left %s contracts -- recording it",
-                side.upper(), slug, _fmt_qty(filled),
+                side.upper(),
+                slug,
+                _fmt_qty(filled),
             )
         else:
             # A float, never int()'d -- this exchange fills some markets in
@@ -307,26 +321,46 @@ class ApexBot:
         if cost_cents <= 0:
             cost_cents = 1
         calibration_note = grounding.calibration_note if side == "yes" else grounding.calibration_note_no
-        rationale = llm.generate_rationale({
-            "action": "buy", "market_slug": slug, "city": grounding.city,
-            "low": grounding.low, "high": grounding.high,
-            "model_prob": model_prob_for_side, "market_implied_prob": market_implied,
-            "edge_pct": decision.edge_fraction, "calibration_note": calibration_note,
-            "stake_cents": cost_cents, "count": filled, "reason": decision.reason,
-            "bankroll_cents": self.memory.bankroll_cents,
-            "recent_lessons": self.memory.recent_lessons(3),
-        })
+        rationale = llm.generate_rationale(
+            {
+                "action": "buy",
+                "market_slug": slug,
+                "city": grounding.city,
+                "low": grounding.low,
+                "high": grounding.high,
+                "model_prob": model_prob_for_side,
+                "market_implied_prob": market_implied,
+                "edge_pct": decision.edge_fraction,
+                "calibration_note": calibration_note,
+                "stake_cents": cost_cents,
+                "count": filled,
+                "reason": decision.reason,
+                "bankroll_cents": self.memory.bankroll_cents,
+                "recent_lessons": self.memory.recent_lessons(3),
+            }
+        )
         self.memory.record_open(
-            market_slug=slug, side=side, count=filled, price_cents=cost_price_cents,
-            cost_cents=cost_cents, model_prob=model_prob_for_side,
-            market_implied_prob=market_implied, edge_pct=decision.edge_fraction,
-            kelly_fraction_used=decision.kelly_fraction_used, rationale=rationale["rationale"],
+            market_slug=slug,
+            side=side,
+            count=filled,
+            price_cents=cost_price_cents,
+            cost_cents=cost_cents,
+            model_prob=model_prob_for_side,
+            market_implied_prob=market_implied,
+            edge_pct=decision.edge_fraction,
+            kelly_fraction_used=decision.kelly_fraction_used,
+            rationale=rationale["rationale"],
         )
         self._print_decision_block(slug, side, market_implied, model_prob_for_side, decision, cost_cents, rationale)
         logger.info(
             "[apex] %s %sx %s @ %d¢ (+%d¢ fee)  edge=%+.1f%%  cost=$%.2f",
-            side.upper(), _fmt_qty(filled), slug, cost_price_cents, fee_cents,
-            decision.edge_fraction * 100, cost_cents / 100,
+            side.upper(),
+            _fmt_qty(filled),
+            slug,
+            cost_price_cents,
+            fee_cents,
+            decision.edge_fraction * 100,
+            cost_cents / 100,
         )
         return cost_cents
 
@@ -362,8 +396,8 @@ class ApexBot:
         self._reconcile_live_positions()
         if self.memory.is_halted():
             logger.error(
-                "[apex] HALTED -- %s. Resolve by hand and clear anomaly_halted_reason "
-                "in the ledger file to resume.", self.memory.anomaly_halted_reason,
+                "[apex] HALTED -- %s. Resolve by hand and clear anomaly_halted_reason in the ledger file to resume.",
+                self.memory.anomaly_halted_reason,
             )
             return
         if self.memory.is_halted_today():
@@ -400,9 +434,7 @@ class ApexBot:
         # Same-city, same-day buckets are draws from one forecast and are
         # highly correlated -- never stack a second position in a city
         # already held (see module docstring).
-        held_cities = {
-            _city_from_slug(t["market_slug"]) for t in self.memory.open_trades()
-        }
+        held_cities = {_city_from_slug(t["market_slug"]) for t in self.memory.open_trades()}
 
         try:
             balance_cents = self.client.get_balance()
@@ -434,8 +466,10 @@ class ApexBot:
 
             model_prob_for_side = grounding.model_prob if side == "yes" else (1.0 - grounding.model_prob)
             decision = risk.evaluate(
-                model_prob=model_prob_for_side, price_cents=cost_price_cents,
-                bankroll_cents=self.memory.bankroll_cents, cash_cents=cash_cents,
+                model_prob=model_prob_for_side,
+                price_cents=cost_price_cents,
+                bankroll_cents=self.memory.bankroll_cents,
+                cash_cents=cash_cents,
                 max_contracts=depth,
             )
             if decision.action == "pass":

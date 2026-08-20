@@ -51,8 +51,10 @@ class KalshiMarketsIndexer(Indexer):
                 stored_this_batch = storage.append_markets(markets)
                 total_fetched += len(markets)
                 total_stored += stored_this_batch
-                print(f"Fetched {len(markets)} markets (total fetched: {total_fetched}, "
-                      f"total newly stored: {total_stored})")
+                print(
+                    f"Fetched {len(markets)} markets (total fetched: {total_fetched}, "
+                    f"total newly stored: {total_stored})"
+                )
 
             if next_cursor:
                 CURSOR_FILE.write_text(next_cursor)

@@ -74,6 +74,7 @@ sports_prop_quotes.jsonl to 60MB/228k lines in one day before that was fixed.
 
 READ-ONLY: only list_all_markets/get_bbo/get_settlement are ever called.
 """
+
 from __future__ import annotations
 
 import json
@@ -82,7 +83,6 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us import tennis_stats_verification
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
@@ -110,8 +110,14 @@ _SUBTYPE_LABELS = {
 
 # All eight real categories -- tour x {game,set} x {spreads,totals}.
 CATEGORIES = (
-    "atp_game_spreads", "atp_set_spreads", "atp_game_totals", "atp_set_totals",
-    "wta_game_spreads", "wta_set_spreads", "wta_game_totals", "wta_set_totals",
+    "atp_game_spreads",
+    "atp_set_spreads",
+    "atp_game_totals",
+    "atp_set_totals",
+    "wta_game_spreads",
+    "wta_set_spreads",
+    "wta_game_totals",
+    "wta_set_totals",
 )
 
 POLL_INTERVAL_SECS = 300
@@ -133,7 +139,7 @@ _MATCHUP_RE = re.compile(r"^(?:asc|tsc)-(?:atp|wta)-([a-z0-9]+-[a-z0-9]+)-\d{4}-
 _THRESHOLD_RE = re.compile(r"-(?:(neg|pos)-)?(\d+)pt(\d+)$")
 
 
-def _parse_threshold(slug: str) -> Optional[float]:
+def _parse_threshold(slug: str) -> float | None:
     m = _THRESHOLD_RE.search(slug)
     if not m:
         return None
@@ -142,7 +148,7 @@ def _parse_threshold(slug: str) -> Optional[float]:
     return -value if sign == "neg" else value
 
 
-def parse_tennis_slug(slug: str) -> Optional[dict]:
+def parse_tennis_slug(slug: str) -> dict | None:
     """(category, matchup, date, threshold) for a tracked tennis spread/
     totals slug, or None if `slug` doesn't start with any tracked prefix,
     or its sub-type marker isn't one of the four recognized ones (including
@@ -214,7 +220,8 @@ class TennisPropQuoteLogger:
                     self._have_bid.add(slug)
         logger.info(
             "Seeded capture state from disk: %d slugs with a known ask, %d with a known bid",
-            len(self._have_ask), len(self._have_bid),
+            len(self._have_ask),
+            len(self._have_bid),
         )
 
     # ── Discovery ────────────────────────────────────────────────────────────
@@ -235,7 +242,10 @@ class TennisPropQuoteLogger:
         self._active = fresh
         logger.info(
             "Discovery: %d active buckets (%d new, %d closed since last scan), %d pending settlement",
-            len(fresh), len(newly_seen), len(closed_slugs), len(self._pending_settlement),
+            len(fresh),
+            len(newly_seen),
+            len(closed_slugs),
+            len(self._pending_settlement),
         )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -251,7 +261,8 @@ class TennisPropQuoteLogger:
         now_iso = datetime.now(timezone.utc).isoformat()
         logged = 0
         pending = {
-            slug: meta for slug, meta in self._active.items()
+            slug: meta
+            for slug, meta in self._active.items()
             if slug not in self._have_ask or slug not in self._have_bid
         }
         for slug, meta in pending.items():
@@ -266,11 +277,18 @@ class TennisPropQuoteLogger:
                 return None if v is None else round(float(v) * 100)
 
             bid, ask = cents("bestBid"), cents("bestAsk")
-            self._append(QUOTES_PATH, {
-                "ts": now_iso, "slug": slug, **meta,
-                "bid": bid, "ask": ask,
-                "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
-            })
+            self._append(
+                QUOTES_PATH,
+                {
+                    "ts": now_iso,
+                    "slug": slug,
+                    **meta,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_depth": md.get("bidDepth"),
+                    "ask_depth": md.get("askDepth"),
+                },
+            )
             logged += 1
             if ask is not None:
                 self._have_ask.add(slug)
@@ -278,7 +296,9 @@ class TennisPropQuoteLogger:
                 self._have_bid.add(slug)
         logger.info(
             "Logged quotes for %d/%d active buckets needing them (%d already fully captured)",
-            logged, len(pending), len(self._active) - len(pending),
+            logged,
+            len(pending),
+            len(self._active) - len(pending),
         )
 
     def _check_settlements(self) -> None:
@@ -293,7 +313,8 @@ class TennisPropQuoteLogger:
                     logger.warning(
                         "Giving up on settlement for %s after %d cycles unresolved -- "
                         "likely a dead/cancelled market, not a slow settlement",
-                        slug, cycles_waited + 1,
+                        slug,
+                        cycles_waited + 1,
                     )
                     dropped += 1
                     continue
@@ -315,20 +336,30 @@ class TennisPropQuoteLogger:
                 logger.warning(
                     "Settlement CORRECTED for %s: exchange said outcome_yes=%s, verified against "
                     "the real ESPN match data says %s -- using the verified value",
-                    slug, outcome_yes, verified,
+                    slug,
+                    outcome_yes,
+                    verified,
                 )
                 outcome_yes = verified
 
-            self._append(SETTLEMENTS_PATH, {
-                "resolved_ts": datetime.now(timezone.utc).isoformat(),
-                "slug": slug, **meta,
-                "outcome_yes": outcome_yes,
-            })
+            self._append(
+                SETTLEMENTS_PATH,
+                {
+                    "resolved_ts": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug,
+                    **meta,
+                    "outcome_yes": outcome_yes,
+                },
+            )
             resolved += 1
         self._pending_settlement = still_pending
         if resolved or dropped:
-            logger.info("Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
-                        resolved, dropped, len(still_pending))
+            logger.info(
+                "Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
+                resolved,
+                dropped,
+                len(still_pending),
+            )
 
     def run_cycle(self) -> None:
         self._discover()
@@ -337,8 +368,9 @@ class TennisPropQuoteLogger:
 
     def run_forever(self, stop_event=None) -> None:
         logger.info(
-            "Tennis spread/totals quote logger started — READ-ONLY, no orders will be placed. "
-            "Categories: %s  poll=%ds", CATEGORIES, POLL_INTERVAL_SECS,
+            "Tennis spread/totals quote logger started — READ-ONLY, no orders will be placed. Categories: %s  poll=%ds",
+            CATEGORIES,
+            POLL_INTERVAL_SECS,
         )
         while True:
             try:
@@ -356,12 +388,15 @@ def main():
     from logging.handlers import RotatingFileHandler
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     log_dir = Path(__file__).resolve().parents[3] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "tennis_prop_quote_logger.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "tennis_prop_quote_logger.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
@@ -374,9 +409,11 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from src.common.single_instance import acquire_single_instance_lock
+
     _lock = acquire_single_instance_lock("tennis_prop_quote_logger")  # noqa: F841
 
     from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
+
     client = PolymarketUSTradingClient()
     try:
         TennisPropQuoteLogger(client).run_forever()

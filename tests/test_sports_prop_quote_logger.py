@@ -5,11 +5,10 @@ stat, player, and threshold apart, and it has to reject anything that
 isn't actually this specific ladder shape (e.g. astatc-fwc-* World Cup
 markets) rather than mis-parsing them.
 """
+
 from __future__ import annotations
 
 import json
-
-import pytest
 
 from src.trading.polymarket_us.models import Market
 from src.trading.polymarket_us.sports_prop_quote_logger import (
@@ -21,20 +20,37 @@ from src.trading.polymarket_us.sports_prop_quote_logger import (
 
 def make_market(slug):
     return Market(
-        slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=True, closed=False, close_time=None,
-        yes_bid=50, yes_ask=52, no_bid=48, no_ask=50,
-        volume=0.0, volume_24h=0.0, bid_depth=10, ask_depth=10,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="sports",
+        tags=[],
+        active=True,
+        closed=False,
+        close_time=None,
+        yes_bid=50,
+        yes_ask=52,
+        no_bid=48,
+        no_ask=50,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=10,
+        ask_depth=10,
     )
 
 
 # ── Slug parsing ─────────────────────────────────────────────────────────────
 
+
 def test_parses_mlb_total_bases_prop():
     meta = parse_prop_slug("astatc-mlb-col-sf-2026-08-14-outs-kylfre-gte16")
     assert meta == {
-        "sport": "mlb", "matchup": "col-sf", "date": "2026-08-14",
-        "stat": "outs", "player": "kylfre", "threshold": 16,
+        "sport": "mlb",
+        "matchup": "col-sf",
+        "date": "2026-08-14",
+        "stat": "outs",
+        "player": "kylfre",
+        "threshold": 16,
     }
 
 
@@ -60,6 +76,7 @@ def test_rejects_non_astatc_slugs():
 
 
 # ── Logger state machine ─────────────────────────────────────────────────────
+
 
 class FakeClient:
     def __init__(self, markets, bbo=None, settlements=None, settlement_errors=()):
@@ -99,15 +116,22 @@ def test_quotes_are_logged_with_parsed_metadata(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.15"}, "bestAsk": {"value": "0.18"},
-            "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.15"},
+                    "bestAsk": {"value": "0.18"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = SportsPropQuoteLogger(client)
     logger_.run_cycle()
 
     from src.trading.polymarket_us.sports_prop_quote_logger import QUOTES_PATH
+
     rows = [json.loads(line) for line in QUOTES_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -128,10 +152,16 @@ def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.15"}, "bestAsk": {"value": "0.18"},
-            "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.15"},
+                    "bestAsk": {"value": "0.18"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = SportsPropQuoteLogger(client)
     logger_._active = {SLUG: parse_prop_slug(SLUG)}
@@ -150,9 +180,16 @@ def test_a_slug_with_only_one_side_known_keeps_being_checked(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.15"}, "bestAsk": None, "bidDepth": 5, "askDepth": 0,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.15"},
+                    "bestAsk": None,
+                    "bidDepth": 5,
+                    "askDepth": 0,
+                }
+            }
+        },
     )
     logger_ = SportsPropQuoteLogger(client)
     logger_._active = {SLUG: parse_prop_slug(SLUG)}
@@ -171,6 +208,7 @@ def test_capture_state_is_seeded_from_disk_on_startup(tmp_path, monkeypatch):
     start re-logging them -- the exact regrowth this whole fix prevents."""
     monkeypatch.chdir(tmp_path)
     from src.trading.polymarket_us.sports_prop_quote_logger import QUOTES_PATH
+
     QUOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     QUOTES_PATH.write_text(json.dumps({"slug": SLUG, "bid": 15, "ask": 18}) + "\n")
 
@@ -203,6 +241,7 @@ def test_bucket_disappearing_moves_to_pending_settlement(tmp_path, monkeypatch):
 # verification logic (mlb_stats_verification.py) is covered by its own
 # dedicated, network-free unit tests in test_mlb_stats_verification.py.
 
+
 def test_settlement_verification_overrides_a_wrong_exchange_settlement(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})  # exchange says YES
@@ -212,6 +251,7 @@ def test_settlement_verification_overrides_a_wrong_exchange_settlement(tmp_path,
     logger_._check_settlements()
 
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is False  # the verified value won, not the exchange's
 
@@ -225,6 +265,7 @@ def test_settlement_verification_agreeing_keeps_the_exchange_value(tmp_path, mon
     logger_._check_settlements()
 
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is True
 
@@ -238,6 +279,7 @@ def test_settlement_verification_inconclusive_falls_back_to_the_exchange_value(t
     logger_._check_settlements()
 
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is True  # exchange's own settlement, unverified but not overridden
 
@@ -247,8 +289,10 @@ def test_settlement_verification_raising_falls_back_to_the_exchange_value(tmp_pa
     trading data down with it -- same fail-open-to-old-behavior posture as
     every other best-effort check in this codebase."""
     monkeypatch.chdir(tmp_path)
+
     def _boom(*a, **k):
         raise RuntimeError("MLB Stats API is down")
+
     client = FakeClient([make_market(SLUG)], settlements={SLUG: {"settlement": 1}})
     logger_ = SportsPropQuoteLogger(client, verify_settlement_fn=_boom)
     logger_._pending_settlement[SLUG] = (parse_prop_slug(SLUG), 0)
@@ -256,6 +300,7 @@ def test_settlement_verification_raising_falls_back_to_the_exchange_value(tmp_pa
     logger_._check_settlements()
 
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert rows[0]["outcome_yes"] is True
 
@@ -273,6 +318,7 @@ def test_resolved_settlement_is_logged_and_cleared_from_pending(tmp_path, monkey
 
     assert SLUG not in logger_._pending_settlement
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -291,6 +337,7 @@ def test_unsettled_bucket_stays_pending_without_writing_a_row(tmp_path, monkeypa
     meta, cycles = logger_._pending_settlement[SLUG]
     assert cycles == 1
     from src.trading.polymarket_us.sports_prop_quote_logger import SETTLEMENTS_PATH
+
     assert not SETTLEMENTS_PATH.exists()
 
 

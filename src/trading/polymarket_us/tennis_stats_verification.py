@@ -31,9 +31,8 @@ matches "Juan[...] Cerundolo", "felaug" matches "Felix Auger-Aliassime",
 READ-ONLY: only httpx GETs to site.api.espn.com are ever used. Never
 places, cancels, or touches an order.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 import httpx
 
@@ -61,14 +60,17 @@ def get_events_for(date: str, tour: str, cache: dict) -> list:
     key = (date, tour)
     if key not in cache:
         yyyymmdd = date.replace("-", "")
-        r = httpx.get(f"https://site.api.espn.com/apis/site/v2/sports/tennis/{TOUR_PATHS[tour]}/scoreboard",
-                       params={"dates": yyyymmdd}, timeout=_HTTP_TIMEOUT)
+        r = httpx.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/tennis/{TOUR_PATHS[tour]}/scoreboard",
+            params={"dates": yyyymmdd},
+            timeout=_HTTP_TIMEOUT,
+        )
         r.raise_for_status()
         cache[key] = r.json().get("events", [])
     return cache[key]
 
 
-def find_match(date: str, tour: str, code1: str, code2: str, cache: dict) -> Optional[dict]:
+def find_match(date: str, tour: str, code1: str, code2: str, cache: dict) -> dict | None:
     """The ESPN competition (match) dict on `date` whose two competitors'
     real names encode to {code1, code2}, or None if no such match is found
     (wrong date, player not in this tour's draw that day, or a code
@@ -87,7 +89,7 @@ def find_match(date: str, tour: str, code1: str, code2: str, cache: dict) -> Opt
     return None
 
 
-def real_total_games(match: dict) -> Optional[int]:
+def real_total_games(match: dict) -> int | None:
     competitors = match.get("competitors", [])
     if len(competitors) != 2:
         return None
@@ -101,7 +103,7 @@ def real_total_games(match: dict) -> Optional[int]:
     return total
 
 
-def real_total_sets(match: dict) -> Optional[int]:
+def real_total_sets(match: dict) -> int | None:
     competitors = match.get("competitors", [])
     if len(competitors) != 2:
         return None
@@ -111,7 +113,7 @@ def real_total_sets(match: dict) -> Optional[int]:
     return counts.pop()
 
 
-def verify_settlement(client, slug: str, meta: dict, cache: dict) -> Optional[bool]:
+def verify_settlement(client, slug: str, meta: dict, cache: dict) -> bool | None:
     """The REAL outcome_yes for a tennis TOTALS bucket (category ending in
     "_game_totals" or "_set_totals"), verified against ESPN's real match
     data, or None if it can't be determined -- including, deliberately, for

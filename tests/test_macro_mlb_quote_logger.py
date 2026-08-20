@@ -5,41 +5,57 @@ display/staleness) right -- unlike sports-props, calibration here never
 decodes the bucket's own semantic threshold, so there's no equivalent of
 that module's stricter shape validation to test.
 """
+
 from __future__ import annotations
 
 import json
 
 import pytest
 
-from src.trading.polymarket_us.models import Market
 from src.trading.polymarket_us.macro_mlb_quote_logger import (
-    CATEGORY_PREFIXES,
     MacroMlbQuoteLogger,
     parse_macro_mlb_slug,
 )
+from src.trading.polymarket_us.models import Market
 
 
 def make_market(slug):
     return Market(
-        slug=slug, id=slug, title=slug, category="macro", tags=[],
-        active=True, closed=False, close_time=None,
-        yes_bid=50, yes_ask=52, no_bid=48, no_ask=50,
-        volume=0.0, volume_24h=0.0, bid_depth=10, ask_depth=10,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="macro",
+        tags=[],
+        active=True,
+        closed=False,
+        close_time=None,
+        yes_bid=50,
+        yes_ask=52,
+        no_bid=48,
+        no_ask=50,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=10,
+        ask_depth=10,
     )
 
 
 # ── Slug parsing ─────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("slug,expected_category", [
-    ("cbpac-usfed-2026-cut", "fed_annual"),
-    ("rdc-boc-2026-09-02-hike50", "rate_decision"),
-    ("gdpc-us-saa-q3-2026-10-29-gt2pt5", "gdp"),
-    ("urc-usunemp-sa-august-2026-09-04-gt4pt5pct", "unemployment"),
-    ("nfpc-usnfp-sa-august-2026-09-04-gt150k", "nonfarm_payrolls"),
-    ("cpic-uscpi-august-yoy-2026-09-11-gt2pt9pct", "cpi"),
-    ("tsc-mlb-stl-cin-2026-08-17-dh1-f5-3pt5", "mlb_totals"),
-    ("asc-mlb-az-bos-2026-08-17-neg-2pt5", "mlb_spreads"),
-])
+
+@pytest.mark.parametrize(
+    "slug,expected_category",
+    [
+        ("cbpac-usfed-2026-cut", "fed_annual"),
+        ("rdc-boc-2026-09-02-hike50", "rate_decision"),
+        ("gdpc-us-saa-q3-2026-10-29-gt2pt5", "gdp"),
+        ("urc-usunemp-sa-august-2026-09-04-gt4pt5pct", "unemployment"),
+        ("nfpc-usnfp-sa-august-2026-09-04-gt150k", "nonfarm_payrolls"),
+        ("cpic-uscpi-august-yoy-2026-09-11-gt2pt9pct", "cpi"),
+        ("tsc-mlb-stl-cin-2026-08-17-dh1-f5-3pt5", "mlb_totals"),
+        ("asc-mlb-az-bos-2026-08-17-neg-2pt5", "mlb_spreads"),
+    ],
+)
 def test_parse_recognizes_every_tracked_category(slug, expected_category):
     meta = parse_macro_mlb_slug(slug)
     assert meta is not None
@@ -73,6 +89,7 @@ def test_mlb_prefixes_are_not_shadowed_by_a_bare_prefix_collision():
 
 
 # ── Logger state machine ─────────────────────────────────────────────────────
+
 
 class FakeClient:
     def __init__(self, markets, bbo=None, settlements=None, settlement_errors=()):
@@ -112,15 +129,22 @@ def test_quotes_are_logged_with_parsed_metadata(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.01"}, "bestAsk": {"value": "0.04"},
-            "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.01"},
+                    "bestAsk": {"value": "0.04"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = MacroMlbQuoteLogger(client)
     logger_.run_cycle()
 
     from src.trading.polymarket_us.macro_mlb_quote_logger import QUOTES_PATH
+
     rows = [json.loads(line) for line in QUOTES_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -136,9 +160,16 @@ def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     client = FakeClient(
         [make_market(SLUG)],
-        bbo={SLUG: {"marketData": {
-            "bestBid": {"value": "0.01"}, "bestAsk": {"value": "0.04"}, "bidDepth": 5, "askDepth": 8,
-        }}},
+        bbo={
+            SLUG: {
+                "marketData": {
+                    "bestBid": {"value": "0.01"},
+                    "bestAsk": {"value": "0.04"},
+                    "bidDepth": 5,
+                    "askDepth": 8,
+                }
+            }
+        },
     )
     logger_ = MacroMlbQuoteLogger(client)
 
@@ -153,6 +184,7 @@ def test_a_slug_with_both_ask_and_bid_is_never_logged_again(tmp_path, monkeypatc
 def test_capture_state_is_seeded_from_disk_on_startup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.trading.polymarket_us.macro_mlb_quote_logger import QUOTES_PATH
+
     QUOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     QUOTES_PATH.write_text(json.dumps({"slug": SLUG, "bid": 1, "ask": 4}) + "\n")
 
@@ -191,6 +223,7 @@ def test_resolved_settlement_is_logged_and_cleared_from_pending(tmp_path, monkey
     logger_._check_settlements()
 
     from src.trading.polymarket_us.macro_mlb_quote_logger import SETTLEMENTS_PATH
+
     rows = [json.loads(line) for line in SETTLEMENTS_PATH.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["slug"] == SLUG
@@ -210,5 +243,6 @@ def test_unsettled_bucket_stays_pending_without_writing_a_row(tmp_path, monkeypa
     logger_._check_settlements()
 
     from src.trading.polymarket_us.macro_mlb_quote_logger import SETTLEMENTS_PATH
+
     assert not SETTLEMENTS_PATH.exists()
     assert SLUG in logger_._pending_settlement

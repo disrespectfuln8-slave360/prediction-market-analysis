@@ -15,16 +15,16 @@ for any platform without its own override, and for callers that don't pass a
 platform at all. Any unset/unrecognized value keeps that platform in paper
 mode — a misconfigured env var must never silently enable live trading.
 """
+
 from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def is_paper_mode(platform: Optional[str] = None) -> bool:
+def is_paper_mode(platform: str | None = None) -> bool:
     if platform:
         override = os.environ.get(f"{platform.upper()}_PAPER_TRADING")
         if override is not None:
@@ -32,12 +32,13 @@ def is_paper_mode(platform: Optional[str] = None) -> bool:
     return os.environ.get("PAPER_TRADING", "true").strip().lower() != "false"
 
 
-def log_mode_banner(bot_name: str, platform: Optional[str] = None) -> None:
+def log_mode_banner(bot_name: str, platform: str | None = None) -> None:
     if is_paper_mode(platform):
         logger.info(
             "[%s] PAPER MODE — simulated fills only, no real orders will be placed. "
             "Set %s_PAPER_TRADING=false to go live.",
-            bot_name, (platform or "").upper() or "PAPER",
+            bot_name,
+            (platform or "").upper() or "PAPER",
         )
     else:
         logger.warning(

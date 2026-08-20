@@ -7,6 +7,7 @@ when uv/the virtualenv is fussy.
 Usage:
     python live_log_watch.py
 """
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,6 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-
 
 WATCHED_LOGS = {
     "kalshi_err": Path("bot_err.log"),
@@ -81,10 +81,7 @@ def load_state() -> tuple[dict[str, LogCursor], WatchStats]:
     if STATE_FILE.exists():
         try:
             raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            cursors = {
-                name: LogCursor(**data)
-                for name, data in raw.get("cursors", {}).items()
-            }
+            cursors = {name: LogCursor(**data) for name, data in raw.get("cursors", {}).items()}
             stats = WatchStats(**raw["stats"])
             for name, path in WATCHED_LOGS.items():
                 cursors.setdefault(name, LogCursor(path=str(path)))

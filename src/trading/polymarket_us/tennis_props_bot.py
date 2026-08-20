@@ -41,11 +41,11 @@ incident (4 of 6 real trades drawing on one shared calibration signal and
 losing together) that this guard exists to prevent there. Same fix, applied
 here before it was ever needed instead of after.
 """
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 from src.trading.polymarket_us.apex import risk
 from src.trading.polymarket_us.apex.memory import ApexMemory
@@ -82,7 +82,7 @@ def _tour_of(category: str) -> str:
     return category.split("_", 1)[0]
 
 
-def _game_key(slug: str) -> Optional[tuple]:
+def _game_key(slug: str) -> tuple | None:
     meta = parse_tennis_slug(slug)
     if meta is None or not _is_totals_meta(meta):
         return None
@@ -93,7 +93,7 @@ def _bucket_key(category: str, side: str, price_cents: int) -> tuple:
     return (category, side, _decile_low(price_cents))
 
 
-def _trade_bucket_key(trade: dict) -> Optional[tuple]:
+def _trade_bucket_key(trade: dict) -> tuple | None:
     meta = parse_tennis_slug(trade["market_slug"])
     if meta is None:
         return None
@@ -104,8 +104,8 @@ class TennisPropsBot:
     def __init__(
         self,
         client,
-        memory: Optional[ApexMemory] = None,
-        calibration: Optional[TennisPropCalibrationEngine] = None,
+        memory: ApexMemory | None = None,
+        calibration: TennisPropCalibrationEngine | None = None,
         poll_interval: int = 300,
     ):
         self.client = client
@@ -158,8 +158,12 @@ class TennisPropsBot:
             pnl_cents = self.memory.record_settlement(trade["id"], outcome_yes, payout_cents)
             logger.info(
                 "[tennis_props] SETTLED %s -> %s  %sx %s  pnl=%+d¢  bankroll=$%.2f",
-                slug, "YES" if outcome_yes else "NO", _fmt_qty(trade["count"]), trade["side"].upper(),
-                pnl_cents or 0, self.memory.bankroll_cents / 100,
+                slug,
+                "YES" if outcome_yes else "NO",
+                _fmt_qty(trade["count"]),
+                trade["side"].upper(),
+                pnl_cents or 0,
+                self.memory.bankroll_cents / 100,
             )
             miss = abs(trade["model_prob"] - (1.0 if won else 0.0))
             if miss >= 0.5 and (pnl_cents or 0) < 0:
@@ -180,7 +184,8 @@ class TennisPropsBot:
             logger.warning("[tennis_props] position reconciliation check failed: %s", exc)
             return
         live_slugs = {
-            p.market_slug for p in live_positions
+            p.market_slug
+            for p in live_positions
             if abs(p.position) > FILL_EPSILON and _game_key(p.market_slug) is not None
         }
         tracked_slugs = {t["market_slug"] for t in self.memory.open_trades()}
@@ -195,12 +200,13 @@ class TennisPropsBot:
         if missing:
             logger.warning(
                 "[tennis_props] memory shows open position(s) the live account no longer holds: %s "
-                "(may be a settlement not yet reconciled)", sorted(missing),
+                "(may be a settlement not yet reconciled)",
+                sorted(missing),
             )
 
     # ── Bucket selection ─────────────────────────────────────────────────────
 
-    def _best_bucket_for_match(self, buckets: list) -> Optional[tuple]:
+    def _best_bucket_for_match(self, buckets: list) -> tuple | None:
         """Highest-edge tradeable bucket across every totals line for one
         match, or None. Priced off the bulk scan's quotes as a coarse
         filter; the caller re-quotes the chosen candidate before sizing."""
@@ -221,7 +227,7 @@ class TennisPropsBot:
                         best = (edge, "no", slug, meta, grounding)
         return best
 
-    def _requote_bucket(self, slug: str, side: str) -> Optional[tuple]:
+    def _requote_bucket(self, slug: str, side: str) -> tuple | None:
         try:
             fresh = self.client.get_market(slug)
         except Exception as exc:
@@ -240,16 +246,25 @@ class TennisPropsBot:
     # ── Order placement ──────────────────────────────────────────────────────
 
     def _place_decision(
-        self, side: str, slug: str, meta: dict, order_yes_price: int, cost_price_cents: int,
-        model_prob_for_side: float, decision: risk.ApexDecision,
+        self,
+        side: str,
+        slug: str,
+        meta: dict,
+        order_yes_price: int,
+        cost_price_cents: int,
+        model_prob_for_side: float,
+        decision: risk.ApexDecision,
     ) -> int:
         market_implied = cost_price_cents / 100.0
 
         before = self._net_position(slug)
         try:
             self.client.place_order(
-                market_slug=slug, side=side,
-                count=decision.count, yes_price=order_yes_price, immediate_or_cancel=True,
+                market_slug=slug,
+                side=side,
+                count=decision.count,
+                yes_price=order_yes_price,
+                immediate_or_cancel=True,
             )
         except Exception as exc:
             logger.warning("[tennis_props] %s order rejected on %s: %s", side.upper(), slug, exc)
@@ -259,7 +274,9 @@ class TennisPropsBot:
                 return 0
             logger.error(
                 "[tennis_props] CRITICAL: %s order on %s reported an error but left %s contracts -- recording it",
-                side.upper(), slug, _fmt_qty(filled),
+                side.upper(),
+                slug,
+                _fmt_qty(filled),
             )
         else:
             raw = self._position_after_order(slug, before) - before
@@ -286,15 +303,27 @@ class TennisPropsBot:
             f"edge {decision.edge_fraction:+.1%}, reason: {decision.reason}"
         )
         self.memory.record_open(
-            market_slug=slug, side=side, count=filled, price_cents=cost_price_cents,
-            cost_cents=cost_cents, model_prob=model_prob_for_side,
-            market_implied_prob=market_implied, edge_pct=decision.edge_fraction,
-            kelly_fraction_used=decision.kelly_fraction_used, rationale=rationale,
+            market_slug=slug,
+            side=side,
+            count=filled,
+            price_cents=cost_price_cents,
+            cost_cents=cost_cents,
+            model_prob=model_prob_for_side,
+            market_implied_prob=market_implied,
+            edge_pct=decision.edge_fraction,
+            kelly_fraction_used=decision.kelly_fraction_used,
+            rationale=rationale,
         )
         logger.info(
             "[tennis_props] %s %sx %s @ %d¢ (+%d¢ fee)  edge=%+.1f%%  cost=$%.2f  %s",
-            side.upper(), _fmt_qty(filled), slug, cost_price_cents, fee_cents,
-            decision.edge_fraction * 100, cost_cents / 100, rationale,
+            side.upper(),
+            _fmt_qty(filled),
+            slug,
+            cost_price_cents,
+            fee_cents,
+            decision.edge_fraction * 100,
+            cost_cents / 100,
+            rationale,
         )
         return cost_cents
 
@@ -315,7 +344,8 @@ class TennisPropsBot:
         if self.memory.is_halted():
             logger.error(
                 "[tennis_props] HALTED -- %s. Resolve by hand and clear anomaly_halted_reason "
-                "in the ledger file to resume.", self.memory.anomaly_halted_reason,
+                "in the ledger file to resume.",
+                self.memory.anomaly_halted_reason,
             )
             return
         if self.memory.is_halted_today():
@@ -350,10 +380,7 @@ class TennisPropsBot:
             return
 
         held_matches = {_game_key(t["market_slug"]) for t in self.memory.open_trades()}
-        held_buckets = {
-            k for k in (_trade_bucket_key(t) for t in self.memory.open_trades())
-            if k is not None
-        }
+        held_buckets = {k for k in (_trade_bucket_key(t) for t in self.memory.open_trades()) if k is not None}
 
         try:
             balance_cents = self.client.get_balance()
@@ -386,7 +413,9 @@ class TennisPropsBot:
             if not grounding.calibration_trustworthy:
                 logger.debug(
                     "[tennis_props] PASS %s (%s side): no longer trustworthy at the requoted price (%s)",
-                    slug, side, grounding.calibration_note,
+                    slug,
+                    side,
+                    grounding.calibration_note,
                 )
                 continue
 
@@ -394,21 +423,28 @@ class TennisPropsBot:
             if bucket_key in held_buckets:
                 logger.info(
                     "[tennis_props] PASS %s (%s side): already holding a position drawing on the same "
-                    "(category, side, decile) signal %s -- not an independent bet", slug, side, bucket_key,
+                    "(category, side, decile) signal %s -- not an independent bet",
+                    slug,
+                    side,
+                    bucket_key,
                 )
                 continue
 
             model_prob_for_side = _model_prob(grounding)
             decision = risk.evaluate(
-                model_prob=model_prob_for_side, price_cents=cost_price_cents,
-                bankroll_cents=self.memory.bankroll_cents, cash_cents=cash_cents,
+                model_prob=model_prob_for_side,
+                price_cents=cost_price_cents,
+                bankroll_cents=self.memory.bankroll_cents,
+                cash_cents=cash_cents,
                 max_contracts=depth,
             )
             if decision.action == "pass":
                 logger.debug("[tennis_props] PASS %s (%s side): %s", slug, side, decision.reason)
                 continue
 
-            spent = self._place_decision(side, slug, meta, order_yes_price, cost_price_cents, model_prob_for_side, decision)
+            spent = self._place_decision(
+                side, slug, meta, order_yes_price, cost_price_cents, model_prob_for_side, decision
+            )
             cash_cents -= spent
             if spent > 0:
                 held_buckets.add(bucket_key)

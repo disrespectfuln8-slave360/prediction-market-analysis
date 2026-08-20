@@ -8,9 +8,8 @@ monkeypatch.chdir(tmp_path) since this bot has no cross-bot file reads of
 its own, but the pattern is kept for consistency with the other bot test
 files and in case that ever changes.
 """
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from src.trading.polymarket_us import tennis_props_bot as bot_module
 from src.trading.polymarket_us.apex.memory import ApexMemory
@@ -21,22 +20,35 @@ from src.trading.polymarket_us.tennis_props_bot import TennisPropsBot
 
 def make_market(slug, yes_bid, yes_ask, ask_depth=50, bid_depth=50, closed=False):
     return Market(
-        slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=not closed, closed=closed, close_time=None,
-        yes_bid=yes_bid, yes_ask=yes_ask,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="sports",
+        tags=[],
+        active=not closed,
+        closed=closed,
+        close_time=None,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
         no_bid=(100 - yes_ask) if yes_ask is not None else None,
         no_ask=(100 - yes_bid) if yes_bid is not None else None,
-        volume=0.0, volume_24h=0.0,
-        bid_depth=bid_depth, ask_depth=ask_depth,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=bid_depth,
+        ask_depth=ask_depth,
     )
 
 
-def make_grounding(category, side, price_cents, trustworthy=True, actual_rate=None,
-                    note="calibration OK: 40 samples", count=40):
+def make_grounding(
+    category, side, price_cents, trustworthy=True, actual_rate=None, note="calibration OK: 40 samples", count=40
+):
     return TennisPropGrounding(
-        category=category, side=side, price_cents=price_cents,
+        category=category,
+        side=side,
+        price_cents=price_cents,
         implied_prob=price_cents / 100.0,
-        calibration_trustworthy=trustworthy, calibration_note=note,
+        calibration_trustworthy=trustworthy,
+        calibration_note=note,
         calibration_sample_count=count,
         calibration_actual_rate=actual_rate,
     )
@@ -91,8 +103,14 @@ class FakeClient:
         filled = min(count, self._fills.get(market_slug, count))
         signed = filled if side == "yes" else -filled
         self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
-        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
-                     count=count, price_cents=yes_price, status="unknown")
+        return Order(
+            order_id="o-" + market_slug,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status="unknown",
+        )
 
 
 def make_bot(client, calibration, memory):
@@ -166,8 +184,15 @@ def test_scan_never_stacks_a_second_position_in_the_same_match(tmp_path, monkeyp
     client = FakeClient([market], fills={SLUG: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug=held_slug, side="yes", count=1.0, price_cents=80, cost_cents=80,
-        model_prob=0.6, market_implied_prob=0.8, edge_pct=0.08, kelly_fraction_used=0.05,
+        market_slug=held_slug,
+        side="yes",
+        count=1.0,
+        price_cents=80,
+        cost_cents=80,
+        model_prob=0.6,
+        market_implied_prob=0.8,
+        edge_pct=0.08,
+        kelly_fraction_used=0.05,
     )
 
     bot = make_bot(client, calibration, memory)
@@ -184,10 +209,12 @@ def test_different_matches_can_both_be_traded(tmp_path, monkeypatch):
     other_market = make_market(other_slug, yes_bid=68, yes_ask=70)  # different decile, avoids the bucket guard too
     grounding = make_grounding("atp_game_totals", "yes", 40, actual_rate=70.0)
     other_grounding = make_grounding("atp_game_totals", "yes", 70, actual_rate=90.0)
-    calibration = FakeCalibration({
-        ("atp_game_totals", "yes", 40): grounding,
-        ("atp_game_totals", "yes", 70): other_grounding,
-    })
+    calibration = FakeCalibration(
+        {
+            ("atp_game_totals", "yes", 40): grounding,
+            ("atp_game_totals", "yes", 70): other_grounding,
+        }
+    )
     client = FakeClient([market, other_market], fills={SLUG: 99, other_slug: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
 
@@ -198,6 +225,7 @@ def test_different_matches_can_both_be_traded(tmp_path, monkeypatch):
 
 
 # ── Bucket-correlation guard (built in from day one, not retrofitted) ──────
+
 
 def test_scan_blocks_a_second_match_landing_in_the_same_calibration_bucket(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -224,8 +252,15 @@ def test_an_already_open_position_blocks_a_new_bucket_match(tmp_path, monkeypatc
     client = FakeClient([market], fills={SLUG: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug=held_slug, side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.7, market_implied_prob=0.4, edge_pct=0.3, kelly_fraction_used=0.05,
+        market_slug=held_slug,
+        side="yes",
+        count=1.0,
+        price_cents=40,
+        cost_cents=40,
+        model_prob=0.7,
+        market_implied_prob=0.4,
+        edge_pct=0.3,
+        kelly_fraction_used=0.05,
     )
 
     bot = make_bot(client, calibration, memory)
@@ -246,10 +281,12 @@ def test_game_totals_and_set_totals_are_independent_buckets(tmp_path, monkeypatc
     other_market = make_market(other_slug, yes_bid=38, yes_ask=40)  # atp_set_totals, same price
     grounding = make_grounding("atp_game_totals", "yes", 40, actual_rate=70.0)
     other_grounding = make_grounding("atp_set_totals", "yes", 40, actual_rate=70.0)
-    calibration = FakeCalibration({
-        ("atp_game_totals", "yes", 40): grounding,
-        ("atp_set_totals", "yes", 40): other_grounding,
-    })
+    calibration = FakeCalibration(
+        {
+            ("atp_game_totals", "yes", 40): grounding,
+            ("atp_set_totals", "yes", 40): other_grounding,
+        }
+    )
     client = FakeClient([market, other_market], fills={SLUG: 99, other_slug: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
 
@@ -292,8 +329,15 @@ def test_stale_calibration_blocks_trading(tmp_path, monkeypatch):
 def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug=SLUG, side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.9, market_implied_prob=0.4, edge_pct=0.4, kelly_fraction_used=0.05,
+        market_slug=SLUG,
+        side="yes",
+        count=1.0,
+        price_cents=40,
+        cost_cents=40,
+        model_prob=0.9,
+        market_implied_prob=0.4,
+        edge_pct=0.4,
+        kelly_fraction_used=0.05,
     )
     market = make_market(SLUG, yes_bid=0, yes_ask=100, closed=True)
     client = FakeClient([market], settlements={SLUG: {"settlement": 0}})

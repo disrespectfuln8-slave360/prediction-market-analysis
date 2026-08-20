@@ -56,6 +56,7 @@ strategy on a completely separate slug family (astatc-* buckets the
 ladder bot itself locks are fine to also see logged here; this module
 takes no position of its own regardless).
 """
+
 from __future__ import annotations
 
 import json
@@ -64,7 +65,6 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us import mlb_stats_verification
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
@@ -87,7 +87,7 @@ _SLUG_RE = re.compile(
 )
 
 
-def parse_prop_slug(slug: str) -> Optional[dict]:
+def parse_prop_slug(slug: str) -> dict | None:
     """(sport, matchup, date, stat, player, threshold) or None if `slug`
     isn't a player-prop threshold ladder in the family this logger tracks
     (e.g. astatc-fwc-* World Cup markets don't have this shape at all and
@@ -156,7 +156,8 @@ class SportsPropQuoteLogger:
                     self._have_bid.add(slug)
         logger.info(
             "Seeded capture state from disk: %d slugs with a known ask, %d with a known bid",
-            len(self._have_ask), len(self._have_bid),
+            len(self._have_ask),
+            len(self._have_bid),
         )
 
     # ── Discovery ────────────────────────────────────────────────────────────
@@ -183,7 +184,10 @@ class SportsPropQuoteLogger:
         self._active = fresh
         logger.info(
             "Discovery: %d active buckets (%d new, %d closed since last scan), %d pending settlement",
-            len(fresh), len(newly_seen), len(closed_slugs), len(self._pending_settlement),
+            len(fresh),
+            len(newly_seen),
+            len(closed_slugs),
+            len(self._pending_settlement),
         )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -199,7 +203,8 @@ class SportsPropQuoteLogger:
         now_iso = datetime.now(timezone.utc).isoformat()
         logged = 0
         pending = {
-            slug: meta for slug, meta in self._active.items()
+            slug: meta
+            for slug, meta in self._active.items()
             if slug not in self._have_ask or slug not in self._have_bid
         }
         for slug, meta in pending.items():
@@ -214,11 +219,18 @@ class SportsPropQuoteLogger:
                 return None if v is None else round(float(v) * 100)
 
             bid, ask = cents("bestBid"), cents("bestAsk")
-            self._append(QUOTES_PATH, {
-                "ts": now_iso, "slug": slug, **meta,
-                "bid": bid, "ask": ask,
-                "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
-            })
+            self._append(
+                QUOTES_PATH,
+                {
+                    "ts": now_iso,
+                    "slug": slug,
+                    **meta,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_depth": md.get("bidDepth"),
+                    "ask_depth": md.get("askDepth"),
+                },
+            )
             logged += 1
             if ask is not None:
                 self._have_ask.add(slug)
@@ -226,7 +238,9 @@ class SportsPropQuoteLogger:
                 self._have_bid.add(slug)
         logger.info(
             "Logged quotes for %d/%d active buckets needing them (%d already fully captured)",
-            logged, len(pending), len(self._active) - len(pending),
+            logged,
+            len(pending),
+            len(self._active) - len(pending),
         )
 
     def _check_settlements(self) -> None:
@@ -241,7 +255,8 @@ class SportsPropQuoteLogger:
                     logger.warning(
                         "Giving up on settlement for %s after %d cycles unresolved -- "
                         "likely a dead/cancelled market, not a slow settlement",
-                        slug, cycles_waited + 1,
+                        slug,
+                        cycles_waited + 1,
                     )
                     dropped += 1
                     continue
@@ -256,7 +271,11 @@ class SportsPropQuoteLogger:
             outcome_yes = settlement_cents >= 50
             try:
                 verified = self._verify_settlement_fn(
-                    self.client, slug, meta, self._schedule_cache, self._boxscore_cache,
+                    self.client,
+                    slug,
+                    meta,
+                    self._schedule_cache,
+                    self._boxscore_cache,
                 )
             except Exception as exc:
                 logger.debug("Settlement verification failed for %s (trusting the exchange): %s", slug, exc)
@@ -265,20 +284,30 @@ class SportsPropQuoteLogger:
                 logger.warning(
                     "Settlement CORRECTED for %s: exchange said outcome_yes=%s, verified against "
                     "the real MLB box score says %s -- using the verified value",
-                    slug, outcome_yes, verified,
+                    slug,
+                    outcome_yes,
+                    verified,
                 )
                 outcome_yes = verified
 
-            self._append(SETTLEMENTS_PATH, {
-                "resolved_ts": datetime.now(timezone.utc).isoformat(),
-                "slug": slug, **meta,
-                "outcome_yes": outcome_yes,
-            })
+            self._append(
+                SETTLEMENTS_PATH,
+                {
+                    "resolved_ts": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug,
+                    **meta,
+                    "outcome_yes": outcome_yes,
+                },
+            )
             resolved += 1
         self._pending_settlement = still_pending
         if resolved or dropped:
-            logger.info("Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
-                        resolved, dropped, len(still_pending))
+            logger.info(
+                "Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
+                resolved,
+                dropped,
+                len(still_pending),
+            )
 
     def run_cycle(self) -> None:
         self._discover()
@@ -287,8 +316,9 @@ class SportsPropQuoteLogger:
 
     def run_forever(self, stop_event=None) -> None:
         logger.info(
-            "Sports-prop quote logger started — READ-ONLY, no orders will be placed. "
-            "Sports: %s  poll=%ds", SPORTS, POLL_INTERVAL_SECS,
+            "Sports-prop quote logger started — READ-ONLY, no orders will be placed. Sports: %s  poll=%ds",
+            SPORTS,
+            POLL_INTERVAL_SECS,
         )
         while True:
             try:
@@ -306,12 +336,15 @@ def main():
     from logging.handlers import RotatingFileHandler
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     log_dir = Path(__file__).resolve().parents[3] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "sports_prop_quote_logger.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "sports_prop_quote_logger.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
@@ -324,9 +357,11 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from src.common.single_instance import acquire_single_instance_lock
+
     _lock = acquire_single_instance_lock("sports_prop_quote_logger")  # noqa: F841
 
     from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
+
     client = PolymarketUSTradingClient()
     try:
         SportsPropQuoteLogger(client).run_forever()

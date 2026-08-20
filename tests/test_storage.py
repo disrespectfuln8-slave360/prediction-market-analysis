@@ -7,13 +7,12 @@ batch's newly-added count). Once the dataset reached multi-million rows
 mid-backfill, the two numbers diverged so far the progress log became
 actively misleading.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import duckdb
-import pytest
 
 from src.common.storage import ParquetStorage
 
@@ -22,7 +21,7 @@ from src.common.storage import ParquetStorage
 class FakeMarket:
     ticker: str
     status: str = "finalized"
-    result: Optional[str] = None
+    result: str | None = None
 
 
 def test_append_markets_returns_the_count_added_this_call(tmp_path):

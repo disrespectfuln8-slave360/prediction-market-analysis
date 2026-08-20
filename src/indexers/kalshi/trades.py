@@ -131,9 +131,7 @@ class KalshiTradesIndexer(Indexer):
             if not trades:
                 return []
             fetched_at = datetime.now(timezone.utc)
-            return [
-                {**asdict(t), "_fetched_at": fetched_at} for t in trades if t.trade_id not in existing_trade_ids
-            ]
+            return [{**asdict(t), "_fetched_at": fetched_at} for t in trades if t.trade_id not in existing_trade_ids]
 
         # Concurrent fetching. Share one client so its rate limiter is enforced
         # across all worker threads instead of each thread getting its own budget.
@@ -146,8 +144,7 @@ class KalshiTradesIndexer(Indexer):
         try:
             with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 futures = {
-                    executor.submit(fetch_ticker_trades, shared_client, ticker): ticker
-                    for ticker in tickers_to_process
+                    executor.submit(fetch_ticker_trades, shared_client, ticker): ticker for ticker in tickers_to_process
                 }
 
                 for future in as_completed(futures):

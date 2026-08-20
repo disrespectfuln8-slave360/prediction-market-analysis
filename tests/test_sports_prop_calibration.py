@@ -6,14 +6,12 @@ MLB categories after one night of collection; exact-price-point bucketing
 cleared at most 2/10 buckets for any category. These tests cover the
 mechanics with synthetic data instead.
 """
+
 from __future__ import annotations
 
 import json
 
-import pytest
-
 from src.trading.polymarket_us.sports_prop_calibration import (
-    MAX_CALIBRATION_ERROR_PCT,
     MIN_SAMPLE_FLOOR,
     SportsPropCalibrationEngine,
     _decile_low,
@@ -27,18 +25,38 @@ def _write_jsonl(path, rows):
 
 
 def _quote(slug, sport="mlb", stat="hits", bid=None, ask=None):
-    return {"ts": "2026-08-15T00:00:00Z", "slug": slug, "sport": sport, "stat": stat,
-            "matchup": "aaa-bbb", "date": "2026-08-15", "player": "player1", "threshold": 1,
-            "bid": bid, "ask": ask, "bid_depth": 10, "ask_depth": 10}
+    return {
+        "ts": "2026-08-15T00:00:00Z",
+        "slug": slug,
+        "sport": sport,
+        "stat": stat,
+        "matchup": "aaa-bbb",
+        "date": "2026-08-15",
+        "player": "player1",
+        "threshold": 1,
+        "bid": bid,
+        "ask": ask,
+        "bid_depth": 10,
+        "ask_depth": 10,
+    }
 
 
 def _settlement(slug, sport="mlb", stat="hits", outcome_yes=True, resolved_ts="2026-08-15T00:00:00+00:00"):
-    return {"resolved_ts": resolved_ts, "slug": slug, "sport": sport, "stat": stat,
-            "matchup": "aaa-bbb", "date": "2026-08-15", "player": "player1", "threshold": 1,
-            "outcome_yes": outcome_yes}
+    return {
+        "resolved_ts": resolved_ts,
+        "slug": slug,
+        "sport": sport,
+        "stat": stat,
+        "matchup": "aaa-bbb",
+        "date": "2026-08-15",
+        "player": "player1",
+        "threshold": 1,
+        "outcome_yes": outcome_yes,
+    }
 
 
 # ── _decile_low ──────────────────────────────────────────────────────────────
+
 
 def test_decile_low_buckets_correctly():
     assert _decile_low(0) == 0
@@ -50,6 +68,7 @@ def test_decile_low_buckets_correctly():
 
 
 # ── Engine: sample floor ─────────────────────────────────────────────────────
+
 
 def test_below_sample_floor_is_untrustworthy(tmp_path):
     quotes_path = tmp_path / "quotes.jsonl"
@@ -111,6 +130,7 @@ def test_badly_miscalibrated_bucket_above_floor_is_untrustworthy(tmp_path):
 
 # ── Engine: per-side independence ────────────────────────────────────────────
 
+
 def test_yes_and_no_sides_are_evaluated_independently(tmp_path):
     """The NO side's true price is (100 - bid), which can land in a
     completely different decile than the YES side's ask -- and needs its
@@ -143,6 +163,7 @@ def test_yes_and_no_sides_are_evaluated_independently(tmp_path):
 
 # ── Engine: category independence ────────────────────────────────────────────
 
+
 def test_categories_are_never_pooled(tmp_path):
     """Mirrors the Kalshi MLB-totals/macro pooling bug found live this
     session -- a stat type with plenty of well-calibrated data must not
@@ -168,6 +189,7 @@ def test_categories_are_never_pooled(tmp_path):
 
 # ── Staleness ────────────────────────────────────────────────────────────────
 
+
 def test_no_data_at_all_is_stale(tmp_path):
     engine = SportsPropCalibrationEngine(
         quotes_path=tmp_path / "missing_quotes.jsonl",
@@ -178,6 +200,7 @@ def test_no_data_at_all_is_stale(tmp_path):
 
 def test_recent_settlement_is_not_stale(tmp_path):
     from datetime import datetime, timezone
+
     quotes_path = tmp_path / "quotes.jsonl"
     settlements_path = tmp_path / "settlements.jsonl"
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -189,6 +212,7 @@ def test_recent_settlement_is_not_stale(tmp_path):
 
 
 # ── extra_sources (NFL's own files, merged alongside the primary MLB pair) ────
+
 
 def test_extra_sources_are_merged_into_the_same_table(tmp_path):
     """NFL's own dedicated files (nfl_prop_quote_logger.py) merge in
@@ -210,7 +234,8 @@ def test_extra_sources_are_merged_into_the_same_table(tmp_path):
     _write_jsonl(settlements_path, [])
 
     engine = SportsPropCalibrationEngine(
-        quotes_path=quotes_path, settlements_path=settlements_path,
+        quotes_path=quotes_path,
+        settlements_path=settlements_path,
         extra_sources=((nfl_quotes_path, nfl_settlements_path),),
     )
     grounding = engine.evaluate("nfl", "td", "yes", price_cents=65)
@@ -244,7 +269,8 @@ def test_extra_sources_never_pool_with_the_primary_sports_stat_categories(tmp_pa
     _write_jsonl(nfl_settlements_path, nfl_settlements)
 
     engine = SportsPropCalibrationEngine(
-        quotes_path=quotes_path, settlements_path=settlements_path,
+        quotes_path=quotes_path,
+        settlements_path=settlements_path,
         extra_sources=((nfl_quotes_path, nfl_settlements_path),),
     )
     mlb_grounding = engine.evaluate("mlb", "hits", "yes", price_cents=50)

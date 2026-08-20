@@ -48,6 +48,7 @@ every poll forever is exactly what grew sports_prop_quotes.jsonl to
 
 READ-ONLY: only list_all_markets/get_bbo/get_settlement are ever called.
 """
+
 from __future__ import annotations
 
 import json
@@ -56,7 +57,6 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
 
@@ -85,7 +85,7 @@ MAX_PENDING_CYCLES = 4 * 24 * 30  # ~30 days at the default 5-minute poll -- mac
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
-def parse_macro_mlb_slug(slug: str) -> Optional[dict]:
+def parse_macro_mlb_slug(slug: str) -> dict | None:
     """(category, date) for a macro or MLB-totals/spreads slug, or None if
     `slug` doesn't start with any tracked prefix. `date` is best-effort
     (regex search for the first YYYY-MM-DD substring) -- not every prefix
@@ -130,7 +130,8 @@ class MacroMlbQuoteLogger:
                     self._have_bid.add(slug)
         logger.info(
             "Seeded capture state from disk: %d slugs with a known ask, %d with a known bid",
-            len(self._have_ask), len(self._have_bid),
+            len(self._have_ask),
+            len(self._have_bid),
         )
 
     # ── Discovery ────────────────────────────────────────────────────────────
@@ -151,7 +152,10 @@ class MacroMlbQuoteLogger:
         self._active = fresh
         logger.info(
             "Discovery: %d active buckets (%d new, %d closed since last scan), %d pending settlement",
-            len(fresh), len(newly_seen), len(closed_slugs), len(self._pending_settlement),
+            len(fresh),
+            len(newly_seen),
+            len(closed_slugs),
+            len(self._pending_settlement),
         )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -167,7 +171,8 @@ class MacroMlbQuoteLogger:
         now_iso = datetime.now(timezone.utc).isoformat()
         logged = 0
         pending = {
-            slug: meta for slug, meta in self._active.items()
+            slug: meta
+            for slug, meta in self._active.items()
             if slug not in self._have_ask or slug not in self._have_bid
         }
         for slug, meta in pending.items():
@@ -182,11 +187,18 @@ class MacroMlbQuoteLogger:
                 return None if v is None else round(float(v) * 100)
 
             bid, ask = cents("bestBid"), cents("bestAsk")
-            self._append(QUOTES_PATH, {
-                "ts": now_iso, "slug": slug, **meta,
-                "bid": bid, "ask": ask,
-                "bid_depth": md.get("bidDepth"), "ask_depth": md.get("askDepth"),
-            })
+            self._append(
+                QUOTES_PATH,
+                {
+                    "ts": now_iso,
+                    "slug": slug,
+                    **meta,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_depth": md.get("bidDepth"),
+                    "ask_depth": md.get("askDepth"),
+                },
+            )
             logged += 1
             if ask is not None:
                 self._have_ask.add(slug)
@@ -194,7 +206,9 @@ class MacroMlbQuoteLogger:
                 self._have_bid.add(slug)
         logger.info(
             "Logged quotes for %d/%d active buckets needing them (%d already fully captured)",
-            logged, len(pending), len(self._active) - len(pending),
+            logged,
+            len(pending),
+            len(self._active) - len(pending),
         )
 
     def _check_settlements(self) -> None:
@@ -209,7 +223,8 @@ class MacroMlbQuoteLogger:
                     logger.warning(
                         "Giving up on settlement for %s after %d cycles unresolved -- "
                         "likely a dead/cancelled market, not a slow settlement",
-                        slug, cycles_waited + 1,
+                        slug,
+                        cycles_waited + 1,
                     )
                     dropped += 1
                     continue
@@ -221,16 +236,24 @@ class MacroMlbQuoteLogger:
                 still_pending[slug] = (meta, cycles_waited + 1)
                 continue
 
-            self._append(SETTLEMENTS_PATH, {
-                "resolved_ts": datetime.now(timezone.utc).isoformat(),
-                "slug": slug, **meta,
-                "outcome_yes": settlement_cents >= 50,
-            })
+            self._append(
+                SETTLEMENTS_PATH,
+                {
+                    "resolved_ts": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug,
+                    **meta,
+                    "outcome_yes": settlement_cents >= 50,
+                },
+            )
             resolved += 1
         self._pending_settlement = still_pending
         if resolved or dropped:
-            logger.info("Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
-                        resolved, dropped, len(still_pending))
+            logger.info(
+                "Settlements: %d resolved, %d dropped (unresolved too long), %d still pending",
+                resolved,
+                dropped,
+                len(still_pending),
+            )
 
     def run_cycle(self) -> None:
         self._discover()
@@ -239,8 +262,9 @@ class MacroMlbQuoteLogger:
 
     def run_forever(self, stop_event=None) -> None:
         logger.info(
-            "Macro/MLB-totals quote logger started — READ-ONLY, no orders will be placed. "
-            "Categories: %s  poll=%ds", sorted(set(CATEGORY_PREFIXES.values())), POLL_INTERVAL_SECS,
+            "Macro/MLB-totals quote logger started — READ-ONLY, no orders will be placed. Categories: %s  poll=%ds",
+            sorted(set(CATEGORY_PREFIXES.values())),
+            POLL_INTERVAL_SECS,
         )
         while True:
             try:
@@ -258,12 +282,15 @@ def main():
     from logging.handlers import RotatingFileHandler
 
     from dotenv import load_dotenv
+
     load_dotenv()
 
     log_dir = Path(__file__).resolve().parents[3] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "macro_mlb_quote_logger.log", maxBytes=5 * 1024 * 1024, backupCount=2,
+        log_dir / "macro_mlb_quote_logger.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
         encoding="utf-8",
     )
     logging.basicConfig(
@@ -276,9 +303,11 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from src.common.single_instance import acquire_single_instance_lock
+
     _lock = acquire_single_instance_lock("macro_mlb_quote_logger")  # noqa: F841
 
     from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
+
     client = PolymarketUSTradingClient()
     try:
         MacroMlbQuoteLogger(client).run_forever()

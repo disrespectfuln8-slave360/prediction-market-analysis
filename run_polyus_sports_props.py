@@ -36,6 +36,7 @@ Usage
 -----
     python run_polyus_sports_props.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,7 +53,10 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _file_handler = RotatingFileHandler(
-    _LOG_DIR / "run_polyus_sports_props.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    _LOG_DIR / "run_polyus_sports_props.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 
 logging.basicConfig(
@@ -89,12 +93,15 @@ def make_polymarket_us_client():
     real = PolymarketUSTradingClient()
     if is_paper_mode("POLYMARKET_US_SPORTS_PROPS"):
         from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
         return PaperPolymarketUSTradingClient(real_client=real, ledger_path=SPORTS_PROPS_PAPER_LEDGER_PATH)
     return real
 
 
 def make_sports_props_memory() -> ApexMemory:
-    path = SPORTS_PROPS_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_SPORTS_PROPS") else SPORTS_PROPS_MEMORY_LIVE_PATH
+    path = (
+        SPORTS_PROPS_MEMORY_PAPER_PATH if is_paper_mode("POLYMARKET_US_SPORTS_PROPS") else SPORTS_PROPS_MEMORY_LIVE_PATH
+    )
     return ApexMemory(path=path, label="sports_props")
 
 
@@ -116,7 +123,9 @@ def main():
     client = make_polymarket_us_client()
     memory = make_sports_props_memory()
     calibration = SportsPropCalibrationEngine()
-    bot = SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=300, allowed_sports=("mlb",))
+    bot = SportsPropsBot(
+        client=client, memory=memory, calibration=calibration, poll_interval=300, allowed_sports=("mlb",)
+    )
 
     logging.getLogger("launcher").info("Sports-props trading bot running. Ctrl+C to stop.")
     bot.run_forever(stop_event)

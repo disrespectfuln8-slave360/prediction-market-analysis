@@ -40,20 +40,45 @@ READ-ONLY: only httpx GETs to statsapi.mlb.com and the caller's own
 client.get_market() are ever used. Never places, cancels, or touches an
 order.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 import httpx
 
 TEAM_CODE_TO_NAME = {
-    "ari": "Diamondbacks", "az": "Diamondbacks", "atl": "Braves", "bal": "Orioles",
-    "bos": "Red Sox", "chc": "Cubs", "cws": "White Sox", "cin": "Reds", "cle": "Guardians",
-    "col": "Rockies", "det": "Tigers", "hou": "Astros", "kc": "Royals", "laa": "Angels",
-    "lad": "Dodgers", "mia": "Marlins", "mil": "Brewers", "min": "Twins", "nym": "Mets",
-    "nyy": "Yankees", "ath": "Athletics", "oak": "Athletics", "phi": "Phillies", "pit": "Pirates",
-    "sd": "Padres", "sf": "Giants", "sea": "Mariners", "stl": "Cardinals", "tb": "Rays",
-    "tex": "Rangers", "tor": "Blue Jays", "was": "Nationals", "wsh": "Nationals",
+    "ari": "Diamondbacks",
+    "az": "Diamondbacks",
+    "atl": "Braves",
+    "bal": "Orioles",
+    "bos": "Red Sox",
+    "chc": "Cubs",
+    "cws": "White Sox",
+    "cin": "Reds",
+    "cle": "Guardians",
+    "col": "Rockies",
+    "det": "Tigers",
+    "hou": "Astros",
+    "kc": "Royals",
+    "laa": "Angels",
+    "lad": "Dodgers",
+    "mia": "Marlins",
+    "mil": "Brewers",
+    "min": "Twins",
+    "nym": "Mets",
+    "nyy": "Yankees",
+    "ath": "Athletics",
+    "oak": "Athletics",
+    "phi": "Phillies",
+    "pit": "Pirates",
+    "sd": "Padres",
+    "sf": "Giants",
+    "sea": "Mariners",
+    "stl": "Cardinals",
+    "tb": "Rays",
+    "tex": "Rangers",
+    "tor": "Blue Jays",
+    "was": "Nationals",
+    "wsh": "Nationals",
 }
 
 BATTER_STATS = {"tb": "totalBases", "hits": "hits", "hr": "homeRuns"}
@@ -70,7 +95,9 @@ def get_boxscore_for(date: str, team_hint_names: list, schedule_cache: dict, box
     -- there is no module-level cache since that would leak across callers
     with no way to bound it."""
     if date not in schedule_cache:
-        r = httpx.get("https://statsapi.mlb.com/api/v1/schedule", params={"sportId": 1, "date": date}, timeout=_HTTP_TIMEOUT)
+        r = httpx.get(
+            "https://statsapi.mlb.com/api/v1/schedule", params={"sportId": 1, "date": date}, timeout=_HTTP_TIMEOUT
+        )
         r.raise_for_status()
         schedule_cache[date] = r.json()
     data = schedule_cache[date]
@@ -88,7 +115,7 @@ def get_boxscore_for(date: str, team_hint_names: list, schedule_cache: dict, box
     return None, None, None
 
 
-def find_player(boxscore: Optional[dict], full_name: str) -> Optional[dict]:
+def find_player(boxscore: dict | None, full_name: str) -> dict | None:
     if boxscore is None:
         return None
     for side in ("away", "home"):
@@ -98,7 +125,7 @@ def find_player(boxscore: Optional[dict], full_name: str) -> Optional[dict]:
     return None
 
 
-def real_stat_value(player_entry: dict, stat_key: str) -> Optional[int]:
+def real_stat_value(player_entry: dict, stat_key: str) -> int | None:
     """The real value for `stat_key` from this game's box score entry, or
     None if the stat key isn't one this module knows how to read. An empty
     batting/pitching dict on a player who IS in the box score (rostered but
@@ -129,7 +156,7 @@ def real_stat_value(player_entry: dict, stat_key: str) -> Optional[int]:
     return None
 
 
-def verify_settlement(client, slug: str, meta: dict, schedule_cache: dict, boxscore_cache: dict) -> Optional[bool]:
+def verify_settlement(client, slug: str, meta: dict, schedule_cache: dict, boxscore_cache: dict) -> bool | None:
     """The REAL outcome_yes for an astatc-mlb-* player-prop bucket, verified
     against the official MLB Stats API, or None if it can't be determined
     (game not found, player not found in the box score at all, or the stat

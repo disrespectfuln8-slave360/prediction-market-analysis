@@ -23,6 +23,7 @@ Usage
 -----
     python run_polyus.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,7 +48,10 @@ _LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Rotating, because this runs unattended for days at a time and an unbounded
 # log is a slow-motion disk problem (run_all.log reached 15 MB).
 _file_handler = RotatingFileHandler(
-    _LOG_DIR / "run_polyus.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    _LOG_DIR / "run_polyus.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 
 logging.basicConfig(
@@ -70,6 +74,7 @@ def make_polymarket_us_client():
     real = PolymarketUSTradingClient()
     if is_paper_mode("POLYMARKET_US"):
         from src.trading.polymarket_us.paper_client import PaperPolymarketUSTradingClient
+
         return PaperPolymarketUSTradingClient(real_client=real)
     return real
 

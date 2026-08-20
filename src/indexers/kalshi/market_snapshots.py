@@ -16,10 +16,10 @@ every poll with dedupe=False, to a SEPARATE directory
 win-rate query are completely unaffected. This can only start collecting
 the right data going forward — it cannot retroactively fix historical gaps.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from src.common.indexer import Indexer
 from src.common.storage import ParquetStorage
@@ -33,7 +33,7 @@ class KalshiMarketSnapshotIndexer(Indexer):
     """Fetches currently-open markets for the given series and appends a
     fresh snapshot row per ticker per run (no cross-run dedup)."""
 
-    def __init__(self, ticker_prefixes: Optional[list[str]] = None):
+    def __init__(self, ticker_prefixes: list[str] | None = None):
         super().__init__(
             name="kalshi_market_snapshots",
             description="Polls open Kalshi markets to build a point-in-time liquidity time series",
@@ -84,7 +84,6 @@ def run_snapshot_loop(stop_event, interval: int, ticker_prefixes: list[str]):
     src.trading.kalshi.bot.run_indexer_loop.
     """
     import logging
-    import time
 
     logger = logging.getLogger(__name__)
     while True:

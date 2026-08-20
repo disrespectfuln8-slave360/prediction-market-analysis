@@ -43,13 +43,14 @@ manufacture losses while logging them as guaranteed profit. Families are
 therefore an explicit allowlist of verified patterns, never a general
 "slug ends in a number" rule. Read the market titles before adding one.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Callable, Optional
+from typing import Callable
 
 from src.trading.polymarket_us.models import Market
 
@@ -89,14 +90,14 @@ def maker_rebate_cents(price_cents: int, count: float) -> int:
     return int(exact.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
 
-def _int_index(token: str) -> Optional[int]:
+def _int_index(token: str) -> int | None:
     try:
         return int(token)
     except ValueError:
         return None
 
 
-def _date_index(token: str) -> Optional[int]:
+def _date_index(token: str) -> int | None:
     """Normalise a slug date to a sortable YYYYMMDD integer.
 
     Both orderings occur live (`prdc-gtavi-12-31-2026` and
@@ -128,17 +129,17 @@ def _date_index(token: str) -> Optional[int]:
 # description is "above $149,999.99 at any point before <date>" — cumulative.
 # The title misleads in both directions; only the description settles it.
 DATE_LADDER_PREFIXES = (
-    "aimc",   # "releases GPT-6 by <date>"
-    "apdc",   # "departure officially announced by <date>"
-    "cpc",    # "above $X at any point before <date>"
-    "ipcc",   # "confirms an IPO by <date>"
+    "aimc",  # "releases GPT-6 by <date>"
+    "apdc",  # "departure officially announced by <date>"
+    "cpc",  # "above $X at any point before <date>"
+    "ipcc",  # "confirms an IPO by <date>"
     "lawec",  # "enacted into U.S. federal law by <date>"
-    "mowc",   # "formally initiates withdrawal by <date>"
-    "opdc",   # "resigns by <date>"
+    "mowc",  # "formally initiates withdrawal by <date>"
+    "opdc",  # "resigns by <date>"
     "pandc",  # "declares any disease a pandemic by <date>"
     "pintc",  # "meets in person between issuance and <date>"
-    "prdc",   # "releases GTA VI by <date>"
-    "stsc",   # "for any day between <start> and <date>"
+    "prdc",  # "releases GTA VI by <date>"
+    "stsc",  # "for any day between <start> and <date>"
 )
 
 MIN_EDGE_CENTS = 1  # smallest gross edge per contract worth even evaluating
@@ -170,7 +171,7 @@ def net_edge_cents(buy_price: int, sell_price: int) -> int:
     return gross - fees
 
 
-def required_net_edge_cents(close_time: Optional[datetime], now: Optional[datetime] = None) -> int:
+def required_net_edge_cents(close_time: datetime | None, now: datetime | None = None) -> int:
     """Minimum acceptable net edge per contract for a lock settling at `close_time`.
 
     A missing close_time is treated as imminent (sports markets settle same
@@ -182,6 +183,8 @@ def required_net_edge_cents(close_time: Optional[datetime], now: Optional[dateti
     ct = close_time if close_time.tzinfo else close_time.replace(tzinfo=timezone.utc)
     days = max(0.0, (ct - now).total_seconds() / 86400.0)
     return MIN_NET_PROFIT_CENTS + int(days) * LOCKUP_CENTS_PER_30_DAYS // 30
+
+
 DEFAULT_LOCK_BUDGET_CENTS = 500  # $5, matching the flat bet-size convention used across this repo
 MAX_CONTRACTS = 10  # cap size regardless of budget — book depth isn't visible from the bulk markets scan
 
@@ -218,8 +221,8 @@ class LadderFamily:
     name: str
     regex: re.Pattern
     subset_is_higher_index: bool
-    index_parser: Callable[[str], Optional[int]] = _int_index
-    prefix_allowlist: Optional[tuple] = None
+    index_parser: Callable[[str], int | None] = _int_index
+    prefix_allowlist: tuple | None = None
 
 
 LADDER_FAMILIES = (
@@ -305,7 +308,7 @@ def _size_lock(buy_price: int, sell_price: int, budget_cents: int) -> int:
 
 def find_ladder_locks(
     markets: list[Market],
-    held: Optional[set] = None,
+    held: set | None = None,
     budget_cents: int = DEFAULT_LOCK_BUDGET_CENTS,
 ) -> list[LadderLock]:
     """Monotonicity violations sized to fit `budget_cents` per lock.
@@ -322,16 +325,14 @@ def find_ladder_locks(
     for (family_name, _prefix), rungs in _group_ladders(markets).items():
         family = by_name[family_name]
         rungs.sort(key=lambda t: t[0])
-        best: Optional[tuple[int, Market, Market]] = None  # (net_edge, superset, subset)
+        best: tuple[int, Market, Market] | None = None  # (net_edge, superset, subset)
 
         for i in range(len(rungs)):
             for j in range(i + 1, len(rungs)):
                 lower, higher = rungs[i][1], rungs[j][1]
                 # The subset is the stricter event; it must not price above
                 # the event it implies.
-                subset, superset = (
-                    (higher, lower) if family.subset_is_higher_index else (lower, higher)
-                )
+                subset, superset = (higher, lower) if family.subset_is_higher_index else (lower, higher)
                 if subset.slug in held or superset.slug in held:
                     continue
                 if subset.yes_bid is None or superset.yes_ask is None:
@@ -355,12 +356,17 @@ def find_ladder_locks(
         count = _size_lock(superset.yes_ask, subset.yes_bid, budget_cents)
         if count <= 0:
             continue
-        locks.append(LadderLock(
-            buy_slug=superset.slug, buy_price=superset.yes_ask,
-            sell_slug=subset.slug, sell_price=subset.yes_bid,
-            count=count, edge_cents=edge,
-            total_cost_cents=(superset.yes_ask + (100 - subset.yes_bid)) * count,
-            family=family.name,
-        ))
+        locks.append(
+            LadderLock(
+                buy_slug=superset.slug,
+                buy_price=superset.yes_ask,
+                sell_slug=subset.slug,
+                sell_price=subset.yes_bid,
+                count=count,
+                edge_cents=edge,
+                total_cost_cents=(superset.yes_ask + (100 - subset.yes_bid)) * count,
+                family=family.name,
+            )
+        )
 
     return locks

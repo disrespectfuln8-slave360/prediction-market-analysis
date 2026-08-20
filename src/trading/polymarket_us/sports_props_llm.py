@@ -9,6 +9,7 @@ price-level accuracy). Everything else about the shape is identical:
 called AFTER risk.evaluate() has already fixed the probability, edge, and
 size; return value only ever fills display fields; never raises.
 """
+
 from __future__ import annotations
 
 import json

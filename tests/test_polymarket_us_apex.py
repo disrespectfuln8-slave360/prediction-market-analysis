@@ -6,6 +6,7 @@ Every trade decision in Apex is made by plain code (risk.py, weather_model.py)
 so it can be tested exactly like this, without ever needing a live LLM call --
 see apex/bot.py's module docstring for why that split exists.
 """
+
 from __future__ import annotations
 
 import pandas as pd
@@ -36,16 +37,27 @@ from src.trading.polymarket_us.strategy import taker_fee_cents
 
 def make_market(slug, yes_bid, yes_ask, ask_depth=50, bid_depth=50, closed=False):
     return Market(
-        slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=not closed, closed=closed, close_time=None,
-        yes_bid=yes_bid, yes_ask=yes_ask,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="sports",
+        tags=[],
+        active=not closed,
+        closed=closed,
+        close_time=None,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
         no_bid=(100 - yes_ask) if yes_ask is not None else None,
         no_ask=(100 - yes_bid) if yes_bid is not None else None,
-        volume=0.0, volume_24h=0.0, bid_depth=bid_depth, ask_depth=ask_depth,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=bid_depth,
+        ask_depth=ask_depth,
     )
 
 
 # ── risk.py: deterministic Kelly/edge/reserve math ──────────────────────────
+
 
 def test_raw_kelly_matches_textbook_even_money_formula():
     # p=0.6 at a 50c coin-flip price: textbook Kelly is 2p-1 = 0.2.
@@ -61,7 +73,9 @@ def test_edge_below_floor_is_a_pass():
     price_frac = (50 + fee) / 100
     decision = risk.evaluate(
         model_prob=price_frac + 0.01,  # ~1% edge, below the 4% floor
-        price_cents=50, bankroll_cents=1000, cash_cents=1000,
+        price_cents=50,
+        bankroll_cents=1000,
+        cash_cents=1000,
     )
     assert decision.action == "pass"
     assert "floor" in decision.reason
@@ -107,7 +121,11 @@ def test_min_stake_floor_rejects_a_negligible_liquidity_capped_stake():
     # (edge, Kelly, cash reserve) and still size down to a couple of cents
     # once the liquidity cap bites.
     decision = risk.evaluate(
-        model_prob=0.9, price_cents=50, bankroll_cents=100_000, cash_cents=100_000, max_contracts=0.02,
+        model_prob=0.9,
+        price_cents=50,
+        bankroll_cents=100_000,
+        cash_cents=100_000,
+        max_contracts=0.02,
     )
     assert decision.action == "pass"
     assert decision.stake_cents == 0
@@ -132,7 +150,9 @@ def test_expensive_longshot_price_is_rejected_even_with_a_huge_edge():
 
 
 def test_moderate_price_at_the_range_boundary_is_still_tradeable():
-    decision = risk.evaluate(model_prob=0.5, price_cents=risk.MIN_TRADEABLE_PRICE_CENTS, bankroll_cents=100_000, cash_cents=100_000)
+    decision = risk.evaluate(
+        model_prob=0.5, price_cents=risk.MIN_TRADEABLE_PRICE_CENTS, bankroll_cents=100_000, cash_cents=100_000
+    )
     assert decision.action == "buy"
 
 
@@ -147,7 +167,11 @@ def test_high_edge_overrides_the_cash_reserve_floor():
 
 def test_liquidity_caps_the_position_size():
     decision = risk.evaluate(
-        model_prob=0.65, price_cents=50, bankroll_cents=1000, cash_cents=1000, max_contracts=0.5,
+        model_prob=0.65,
+        price_cents=50,
+        bankroll_cents=1000,
+        cash_cents=1000,
+        max_contracts=0.5,
     )
     assert decision.action == "buy"
     assert decision.count == pytest.approx(0.5)
@@ -156,7 +180,11 @@ def test_liquidity_caps_the_position_size():
 
 def test_zero_depth_is_a_pass():
     decision = risk.evaluate(
-        model_prob=0.9, price_cents=50, bankroll_cents=1000, cash_cents=1000, max_contracts=0,
+        model_prob=0.9,
+        price_cents=50,
+        bankroll_cents=1000,
+        cash_cents=1000,
+        max_contracts=0,
     )
     assert decision.action == "pass"
 
@@ -168,11 +196,19 @@ def test_evaluate_never_spends_more_than_available_cash():
 
 # ── memory.py: bankroll/trade/lesson ledger ──────────────────────────────────
 
+
 def test_record_open_and_settlement_round_trip(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     trade_id = memory.record_open(
-        market_slug="s", side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.6, market_implied_prob=0.4, edge_pct=0.1, kelly_fraction_used=0.05,
+        market_slug="s",
+        side="yes",
+        count=1.0,
+        price_cents=40,
+        cost_cents=40,
+        model_prob=0.6,
+        market_implied_prob=0.4,
+        edge_pct=0.1,
+        kelly_fraction_used=0.05,
     )
     assert memory.cash_cents == 960
     assert memory.committed_cents == 40
@@ -189,8 +225,15 @@ def test_record_open_and_settlement_round_trip(tmp_path):
 def test_termination_when_bankroll_hits_the_floor(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     trade_id = memory.record_open(
-        market_slug="s", side="yes", count=1.0, price_cents=95, cost_cents=950,
-        model_prob=0.5, market_implied_prob=0.5, edge_pct=0.0, kelly_fraction_used=0.05,
+        market_slug="s",
+        side="yes",
+        count=1.0,
+        price_cents=95,
+        cost_cents=950,
+        model_prob=0.5,
+        market_implied_prob=0.5,
+        edge_pct=0.0,
+        kelly_fraction_used=0.05,
     )
     memory.record_settlement(trade_id, outcome_yes=False, payout_cents=0)
     assert memory.bankroll_cents <= TERMINATION_FLOOR_CENTS
@@ -204,8 +247,15 @@ def test_daily_drawdown_halts_and_clears_next_day(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_module, "_today_utc", lambda: "2026-08-12")
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     trade_id = memory.record_open(
-        market_slug="s", side="yes", count=1.0, price_cents=20, cost_cents=200,
-        model_prob=0.6, market_implied_prob=0.2, edge_pct=0.3, kelly_fraction_used=0.05,
+        market_slug="s",
+        side="yes",
+        count=1.0,
+        price_cents=20,
+        cost_cents=200,
+        model_prob=0.6,
+        market_implied_prob=0.2,
+        edge_pct=0.3,
+        kelly_fraction_used=0.05,
     )
     memory.record_settlement(trade_id, outcome_yes=False, payout_cents=0)
     assert memory.daily_drawdown_fraction() > DAILY_DRAWDOWN_HALT_FRACTION
@@ -221,8 +271,15 @@ def test_memory_persists_across_instances(tmp_path):
     path = tmp_path / "m.json"
     first = ApexMemory(path=path, starting_bankroll_cents=1000)
     first.record_open(
-        market_slug="s", side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.6, market_implied_prob=0.4, edge_pct=0.1, kelly_fraction_used=0.05,
+        market_slug="s",
+        side="yes",
+        count=1.0,
+        price_cents=40,
+        cost_cents=40,
+        model_prob=0.6,
+        market_implied_prob=0.4,
+        edge_pct=0.1,
+        kelly_fraction_used=0.05,
     )
     first.add_lesson("test lesson")
 
@@ -234,8 +291,10 @@ def test_memory_persists_across_instances(tmp_path):
 
 # ── weather_model.py: grounded probability + calibration gate ──────────────
 
+
 def test_bucket_probability_matches_the_normal_cdf_with_continuity_correction():
     from scipy.stats import norm
+
     expected = norm.cdf(76.5, loc=75, scale=3) - norm.cdf(73.5, loc=75, scale=3)
     assert bucket_probability(75, 3, 74, 76) == pytest.approx(expected)
 
@@ -280,8 +339,17 @@ def test_build_calibration_table_groups_and_scores_correctly():
     # Tiny sigma makes bucket_probability effectively 0 or 1 depending on
     # whether mu falls inside the bucket -- lets the test control which
     # decile each row lands in without solving the CDF by hand.
-    rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
-              "settlement": 1 if i < 27 else 0} for i in range(30)]
+    rows = [
+        {
+            "city": "nychigh",
+            "forecast_mu": 75.0,
+            "forecast_sigma": 0.01,
+            "low": 75.0,
+            "high": 76.0,
+            "settlement": 1 if i < 27 else 0,
+        }
+        for i in range(30)
+    ]
     df = pd.DataFrame(rows)
     table = _build_calibration_table(df)
     assert table[("nychigh", 90)]["count"] == 30
@@ -296,10 +364,21 @@ def test_build_calibration_table_scopes_each_city_independently():
     60-70% bucket was judged by that, not its own history. Same rows, same
     decile, different cities: each city's stats must stay separate."""
     rows = (
-        [{"city": "laxhigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
-          "settlement": 1 if i < 15 else 0} for i in range(30)]  # LAX: 50% actual vs ~99% predicted -- bad
-        + [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
-            "settlement": 1} for _ in range(30)]  # NYC: 100% actual vs ~99% predicted -- fine
+        [
+            {
+                "city": "laxhigh",
+                "forecast_mu": 75.0,
+                "forecast_sigma": 0.01,
+                "low": 75.0,
+                "high": 76.0,
+                "settlement": 1 if i < 15 else 0,
+            }
+            for i in range(30)
+        ]  # LAX: 50% actual vs ~99% predicted -- bad
+        + [
+            {"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0, "settlement": 1}
+            for _ in range(30)
+        ]  # NYC: 100% actual vs ~99% predicted -- fine
     )
     table = _build_calibration_table(pd.DataFrame(rows))
     assert table[("laxhigh", 90)]["actual_rate"] == pytest.approx(50.0)
@@ -309,7 +388,9 @@ def test_build_calibration_table_scopes_each_city_independently():
 def test_trustworthiness_requires_the_sample_floor(tmp_path):
     engine = WeatherGroundingEngine(history_path=tmp_path / "missing.parquet")
     try:
-        engine._calibration = {("nychigh", 90): {"count": MIN_SAMPLE_FLOOR - 1, "actual_rate": 90.0, "mean_predicted": 91.0}}
+        engine._calibration = {
+            ("nychigh", 90): {"count": MIN_SAMPLE_FLOOR - 1, "actual_rate": 90.0, "mean_predicted": 91.0}
+        }
         trustworthy, _note, count = engine._trustworthiness("nychigh", 0.95)
         assert not trustworthy
         assert count == MIN_SAMPLE_FLOOR - 1
@@ -377,7 +458,9 @@ def test_evaluate_bucket_checks_trustworthiness_independently_per_side(tmp_path)
         }
         date_str = engine._local_today("nychigh")
         engine._forecast_cache[("nychigh", date_str)] = {
-            "forecast_mu": 60.0, "forecast_sigma": 1.0, "forecast_cycle": "c",
+            "forecast_mu": 60.0,
+            "forecast_sigma": 1.0,
+            "forecast_cycle": "c",
         }
         grounding = engine.evaluate_bucket("nychigh", 80, 81)
         assert grounding is not None
@@ -404,7 +487,9 @@ def test_evaluate_bucket_shrinks_sigma_for_live_sizing_only(tmp_path):
     try:
         date_str = engine._local_today("nychigh")
         engine._forecast_cache[("nychigh", date_str)] = {
-            "forecast_mu": 80.0, "forecast_sigma": 2.0, "forecast_cycle": "c",
+            "forecast_mu": 80.0,
+            "forecast_sigma": 2.0,
+            "forecast_cycle": "c",
         }
         grounding = engine.evaluate_bucket("nychigh", 84.0, 85.0)  # ~2-2.5 sigma above the mean
 
@@ -436,8 +521,18 @@ def test_history_freshness_gate(tmp_path):
 
 def test_reload_calibration_reads_a_real_parquet_file(tmp_path):
     history_path = tmp_path / "weather_history.parquet"
-    rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
-              "settlement": 1, "date": "2026-08-01"} for _ in range(30)]
+    rows = [
+        {
+            "city": "nychigh",
+            "forecast_mu": 75.0,
+            "forecast_sigma": 0.01,
+            "low": 75.0,
+            "high": 76.0,
+            "settlement": 1,
+            "date": "2026-08-01",
+        }
+        for _ in range(30)
+    ]
     pd.DataFrame(rows).to_parquet(history_path)
 
     engine = WeatherGroundingEngine(history_path=history_path)
@@ -450,6 +545,7 @@ def test_reload_calibration_reads_a_real_parquet_file(tmp_path):
 
 
 # ── bot.py: scan/decide/execute loop ────────────────────────────────────────
+
 
 class FakeGrounding:
     def __init__(self, buckets_by_city, groundings, stale=False):
@@ -500,8 +596,14 @@ class FakeApexClient:
         filled = min(count, self._fills.get(market_slug, count))
         signed = filled if side == "yes" else -filled
         self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
-        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
-                     count=count, price_cents=yes_price, status="unknown")
+        return Order(
+            order_id="o-" + market_slug,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status="unknown",
+        )
 
 
 def make_bot(client, grounding, memory):
@@ -516,11 +618,19 @@ def test_scan_buys_yes_when_the_model_beats_the_ask(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK: 30 samples, 2.0pp measured error",
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
@@ -545,11 +655,19 @@ def test_scan_buys_no_at_the_yes_equivalent_price(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=70, yes_ask=95)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.10,
-        forecast_mu=70.0, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK: 30 samples, 2.0pp measured error",
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.10,
+        forecast_mu=70.0,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK: 30 samples, 2.0pp measured error",
         calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
@@ -575,11 +693,19 @@ def test_scan_trades_the_no_side_when_only_its_decile_is_calibrated(tmp_path, mo
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=40, yes_ask=42)  # NO costs 100-40=60c
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.05,
-        forecast_mu=60.0, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=False, calibration_note="only 2 historical samples",
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.05,
+        forecast_mu=60.0,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=False,
+        calibration_note="only 2 historical samples",
         calibration_sample_count=2,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK: 40 samples, 1.0pp measured error",
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK: 40 samples, 1.0pp measured error",
         calibration_sample_count_no=40,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
@@ -599,11 +725,19 @@ def test_scan_passes_when_calibration_is_untrustworthy(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=False, calibration_note="only 5 historical samples",
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=False,
+        calibration_note="only 5 historical samples",
         calibration_sample_count=5,
-        calibration_trustworthy_no=False, calibration_note_no="only 5 historical samples",
+        calibration_trustworthy_no=False,
+        calibration_note_no="only 5 historical samples",
         calibration_sample_count_no=5,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
@@ -622,17 +756,34 @@ def test_scan_never_stacks_a_second_position_in_the_same_city(tmp_path, monkeypa
     held_slug = "tc-temp-nychigh-2026-08-09-gte70lt71f"
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market, make_market(held_slug, yes_bid=50, yes_ask=52)], fills={SLUG: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug=held_slug, side="yes", count=1.0, price_cents=52, cost_cents=52,
-        model_prob=0.6, market_implied_prob=0.52, edge_pct=0.08, kelly_fraction_used=0.05,
+        market_slug=held_slug,
+        side="yes",
+        count=1.0,
+        price_cents=52,
+        cost_cents=52,
+        model_prob=0.6,
+        market_implied_prob=0.52,
+        edge_pct=0.08,
+        kelly_fraction_used=0.05,
     )
 
     bot = make_bot(client, fake_grounding, memory)
@@ -646,10 +797,20 @@ def test_terminated_bot_only_observes(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -666,13 +827,25 @@ def test_stale_calibration_history_blocks_trading(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding(
-        {"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding}, stale=True,
+        {"nychigh": [(SLUG, 80, 81, market)]},
+        {("nychigh", 80, 81): grounding},
+        stale=True,
     )
     client = FakeApexClient([market], fills={SLUG: 99})
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
@@ -697,8 +870,15 @@ def test_record_manual_close_reconciles_without_faking_a_settlement(tmp_path):
     never actually resolved."""
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     trade_id = memory.record_open(
-        market_slug=SLUG, side="yes", count=0.3, price_cents=8, cost_cents=2,
-        model_prob=0.19, market_implied_prob=0.08, edge_pct=0.11, kelly_fraction_used=0.03,
+        market_slug=SLUG,
+        side="yes",
+        count=0.3,
+        price_cents=8,
+        cost_cents=2,
+        model_prob=0.19,
+        market_implied_prob=0.08,
+        edge_pct=0.11,
+        kelly_fraction_used=0.03,
     )
 
     pnl = memory.record_manual_close(trade_id, proceeds_cents=2)
@@ -721,8 +901,15 @@ def test_record_manual_close_can_still_trip_the_termination_floor(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.cash_cents = 105  # $1.05, just above the $1.00 floor
     trade_id = memory.record_open(
-        market_slug=SLUG, side="yes", count=5.0, price_cents=10, cost_cents=50,
-        model_prob=0.3, market_implied_prob=0.1, edge_pct=0.2, kelly_fraction_used=0.05,
+        market_slug=SLUG,
+        side="yes",
+        count=5.0,
+        price_cents=10,
+        cost_cents=50,
+        model_prob=0.3,
+        market_implied_prob=0.1,
+        edge_pct=0.2,
+        kelly_fraction_used=0.05,
     )
 
     memory.record_manual_close(trade_id, proceeds_cents=0)  # sold for nothing
@@ -744,7 +931,11 @@ def test_record_manual_open_reconciles_a_stray_position_without_fabricating_a_mo
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
 
     trade_id = memory.record_manual_open(
-        market_slug=SLUG, side="yes", count=2.25, price_cents=43, cost_cents=97,
+        market_slug=SLUG,
+        side="yes",
+        count=2.25,
+        price_cents=43,
+        cost_cents=97,
     )
 
     assert memory.cash_cents == 903  # 1000 - 97
@@ -766,8 +957,15 @@ def test_record_manual_open_reconciles_a_stray_position_without_fabricating_a_mo
 def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
     memory.record_open(
-        market_slug=SLUG, side="yes", count=1.0, price_cents=40, cost_cents=40,
-        model_prob=0.9, market_implied_prob=0.4, edge_pct=0.4, kelly_fraction_used=0.05,
+        market_slug=SLUG,
+        side="yes",
+        count=1.0,
+        price_cents=40,
+        cost_cents=40,
+        model_prob=0.9,
+        market_implied_prob=0.4,
+        edge_pct=0.4,
+        kelly_fraction_used=0.05,
     )
     market = make_market(SLUG, yes_bid=0, yes_ask=100, closed=True)
     client = FakeApexClient([market], settlements={SLUG: {"settlement": 0}})  # resolved NO -- a big miss
@@ -786,6 +984,7 @@ def test_settlement_reconciliation_pays_out_and_logs_a_miss_lesson(tmp_path):
 
 # ── Regression tests for the adversarial-review findings ───────────────────
 
+
 def test_recorded_cost_includes_the_taker_fee(tmp_path, monkeypatch):
     """risk.py sizes off a fee-inclusive edge, but the dollar amount it
     hands back is priced at the raw contract price -- the fee has to be
@@ -795,10 +994,20 @@ def test_recorded_cost_includes_the_taker_fee(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -822,10 +1031,20 @@ def test_tiny_fractional_fill_is_never_recorded_as_costing_zero(tmp_path, monkey
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     # Only 0.01 contracts actually fill, far below the ~1.25 the sizing
@@ -873,10 +1092,20 @@ def test_exception_path_polls_before_giving_up_on_a_delayed_fill(tmp_path, monke
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = DelayedFillOnErrorClient([market], fills={SLUG: 2.0}, delay_reads=2)
@@ -898,18 +1127,34 @@ class WrongDirectionFillClient(FakeApexClient):
         filled = min(count, self._fills.get(market_slug, count))
         signed = -filled if side == "yes" else filled  # backwards on purpose
         self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
-        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
-                     count=count, price_cents=yes_price, status="unknown")
+        return Order(
+            order_id="o-" + market_slug,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status="unknown",
+        )
 
 
 def test_wrong_direction_fill_halts_instead_of_recording_a_fabricated_trade(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = WrongDirectionFillClient([market], fills={SLUG: 99})
@@ -932,10 +1177,20 @@ def test_untracked_live_position_halts_before_trading(tmp_path, monkeypatch):
     stray_slug = "tc-temp-nychigh-2026-08-09-gte70lt71f"
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -957,10 +1212,20 @@ def test_reconciliation_ignores_other_bots_live_positions(tmp_path, monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -1024,8 +1289,18 @@ def test_history_file_appearing_after_startup_is_discovered_on_next_scan(tmp_pat
         assert grounding._history_max_date is None  # file doesn't exist yet
 
         # The backfill "finishes" after the engine was already constructed.
-        rows = [{"city": "nychigh", "forecast_mu": 75.0, "forecast_sigma": 0.01, "low": 75.0, "high": 76.0,
-                  "settlement": 1, "date": "2026-08-12"} for _ in range(30)]
+        rows = [
+            {
+                "city": "nychigh",
+                "forecast_mu": 75.0,
+                "forecast_sigma": 0.01,
+                "low": 75.0,
+                "high": 76.0,
+                "settlement": 1,
+                "date": "2026-08-12",
+            }
+            for _ in range(30)
+        ]
         pd.DataFrame(rows).to_parquet(history_path)
 
         client = FakeApexClient([], fills={})
@@ -1043,10 +1318,20 @@ def test_halted_bot_stops_trading_and_only_reports(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     market = make_market(SLUG, yes_bid=38, yes_ask=40)
     grounding = BucketGrounding(
-        city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.70,
-        forecast_mu=80.5, forecast_sigma=1.0, forecast_cycle="c",
-        calibration_trustworthy=True, calibration_note="calibration OK", calibration_sample_count=30,
-        calibration_trustworthy_no=True, calibration_note_no="calibration OK", calibration_sample_count_no=30,
+        city="nychigh",
+        date="2026-08-10",
+        low=80,
+        high=81,
+        model_prob=0.70,
+        forecast_mu=80.5,
+        forecast_sigma=1.0,
+        forecast_cycle="c",
+        calibration_trustworthy=True,
+        calibration_note="calibration OK",
+        calibration_sample_count=30,
+        calibration_trustworthy_no=True,
+        calibration_note_no="calibration OK",
+        calibration_sample_count_no=30,
     )
     fake_grounding = FakeGrounding({"nychigh": [(SLUG, 80, 81, market)]}, {("nychigh", 80, 81): grounding})
     client = FakeApexClient([market], fills={SLUG: 99})
@@ -1064,6 +1349,7 @@ def test_halted_bot_stops_trading_and_only_reports(tmp_path, monkeypatch):
 # hand" -- added 2026-08-17 after a real incident needed exactly this
 # (sports_props_bot's stray-position halt on the ladder bot's own legs,
 # cleared by hand after confirming via the exchange's own trade records).
+
 
 def test_clear_halt_resets_the_anomaly_reason(tmp_path):
     memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)

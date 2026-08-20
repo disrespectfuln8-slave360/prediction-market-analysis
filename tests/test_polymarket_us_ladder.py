@@ -7,6 +7,7 @@ positions. Every test below that mentions "silent fill" is modelling that
 exact API behaviour: an order response that admits nothing, and a position
 that says otherwise.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -23,17 +24,27 @@ from src.trading.polymarket_us.strategy import (
 
 def make_market(slug, yes_bid, yes_ask, bid_depth=50, ask_depth=50, close_time=None):
     return Market(
-        slug=slug, id=slug, title=slug, category="sports", tags=[],
-        active=True, closed=False, close_time=close_time,
-        yes_bid=yes_bid, yes_ask=yes_ask,
+        slug=slug,
+        id=slug,
+        title=slug,
+        category="sports",
+        tags=[],
+        active=True,
+        closed=False,
+        close_time=close_time,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
         no_bid=(100 - yes_ask) if yes_ask is not None else None,
         no_ask=(100 - yes_bid) if yes_bid is not None else None,
-        volume=0.0, volume_24h=0.0,
-        bid_depth=bid_depth, ask_depth=ask_depth,
+        volume=0.0,
+        volume_24h=0.0,
+        bid_depth=bid_depth,
+        ask_depth=ask_depth,
     )
 
 
 # ── Sizing ───────────────────────────────────────────────────────────────────
+
 
 def test_size_lock_returns_zero_when_budget_cannot_cover_one_contract():
     # 99c/contract against a 48c budget. Rounding up to 1 here is what buys a
@@ -49,6 +60,7 @@ def test_size_lock_never_exceeds_budget():
 
 
 # ── Liquidity filter ─────────────────────────────────────────────────────────
+
 
 def test_wide_spread_rungs_are_not_traded():
     # gte180 from the incident: 52/99, a 47c book nobody will trade at.
@@ -68,7 +80,7 @@ def test_one_sided_book_is_not_traded():
 
 
 def test_before_round_ladder_runs_the_other_direction():
-    """"Fight ends before Round N" nests the opposite way from "N+ goals".
+    """ "Fight ends before Round N" nests the opposite way from "N+ goals".
 
     before(2) implies before(3), so the LOWER rung is the subset and price
     must rise with N. A violation is the low rung bid ABOVE the high rung
@@ -113,7 +125,7 @@ def test_win_in_round_markets_are_never_traded_as_a_ladder():
 
 
 def test_by_date_ladder_uses_earlier_date_as_the_subset():
-    """"Released by <date>": earlier deadline implies later one."""
+    """ "Released by <date>": earlier deadline implies later one."""
     markets = [
         make_market("prdc-gtavi-11-19-2026", yes_bid=92, yes_ask=93),
         make_market("prdc-gtavi-12-31-2026", yes_bid=85, yes_ask=86),
@@ -122,7 +134,7 @@ def test_by_date_ladder_uses_earlier_date_as_the_subset():
     assert len(locks) == 1
     lock = locks[0]
     assert lock.family == "by_date"
-    assert lock.buy_slug == "prdc-gtavi-12-31-2026"   # YES on the later (implied) date
+    assert lock.buy_slug == "prdc-gtavi-12-31-2026"  # YES on the later (implied) date
     assert lock.sell_slug == "prdc-gtavi-11-19-2026"  # NO on the earlier (implier)
     assert lock.edge_cents == 6
 
@@ -145,8 +157,15 @@ def test_fee_estimate_never_understates_observed_commissions():
     never understate (a floor that is too loose books losers as winners).
     """
     observed = [
-        (17, 1, 1), (20, 1, 1), (18, 2, 2), (88, 2, 1), (87, 2, 1),
-        (11, 1, 1), (4, 2, 0), (3, 2, 0), (17, 2, 2),
+        (17, 1, 1),
+        (20, 1, 1),
+        (18, 2, 2),
+        (88, 2, 1),
+        (87, 2, 1),
+        (11, 1, 1),
+        (4, 2, 0),
+        (3, 2, 0),
+        (17, 2, 2),
     ]
     for price, count, commission in observed:
         assert taker_fee_cents(price, count) >= commission
@@ -169,6 +188,7 @@ def test_long_dated_lock_needs_more_edge_than_same_day():
     months out, where the lock-up hurdle demands more.
     """
     from datetime import datetime, timedelta, timezone
+
     far = datetime.now(timezone.utc) + timedelta(days=120)
     near = datetime.now(timezone.utc) + timedelta(hours=6)
 
@@ -193,7 +213,8 @@ def test_paper_ledger_charges_fees(tmp_path):
             pass
 
     client = PaperPolymarketUSTradingClient(
-        real_client=_StubReal(), ledger_path=tmp_path / "ledger.json",
+        real_client=_StubReal(),
+        ledger_path=tmp_path / "ledger.json",
         starting_balance_cents=10_000,
     )
     client.place_order(market_slug="m", side="yes", count=5, yes_price=40)
@@ -218,7 +239,8 @@ def test_paper_ledger_accepts_a_fractional_contract_count(tmp_path):
             pass
 
     client = PaperPolymarketUSTradingClient(
-        real_client=_StubReal(), ledger_path=tmp_path / "ledger.json",
+        real_client=_StubReal(),
+        ledger_path=tmp_path / "ledger.json",
         starting_balance_cents=10_000,
     )
     order = client.place_order(market_slug="m", side="yes", count=1.25, yes_price=40)
@@ -282,11 +304,11 @@ def test_tight_book_violation_is_still_found():
 
 # ── Fake client modelling the real API's unreliable fill reporting ───────────
 
+
 class FakeClient:
     """Reports whatever `report_status` says, while positions tell the truth."""
 
-    def __init__(self, markets, fills, report_status="unknown", balance=500,
-                 sell_fails=False):
+    def __init__(self, markets, fills, report_status="unknown", balance=500, sell_fails=False):
         self._markets = {m.slug: m for m in markets}
         self._fills = fills  # slug -> contracts that actually fill per order
         self._report_status = report_status
@@ -300,8 +322,7 @@ class FakeClient:
         return self._balance
 
     def get_positions(self):
-        return [Position(market_slug=s, position=p)
-                for s, p in self.positions.items() if p != 0]
+        return [Position(market_slug=s, position=p) for s, p in self.positions.items() if p != 0]
 
     def get_open_orders(self):
         return []
@@ -312,14 +333,19 @@ class FakeClient:
     def list_all_markets(self, **kw):
         return list(self._markets.values())
 
-    def place_order(self, market_slug, side, count, yes_price,
-                    immediate_or_cancel=False):
+    def place_order(self, market_slug, side, count, yes_price, immediate_or_cancel=False):
         self.orders.append((market_slug, side, count, yes_price, immediate_or_cancel))
         filled = min(count, self._fills.get(market_slug, 0))
         signed = filled if side == "yes" else -filled
         self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
-        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
-                     count=count, price_cents=yes_price, status=self._report_status)
+        return Order(
+            order_id="o-" + market_slug,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status=self._report_status,
+        )
 
     def close_long(self, market_slug, count, price_cents):
         self.sells.append((market_slug, count, price_cents))
@@ -334,6 +360,7 @@ def make_bot(client):
     # Position readback is immediate in these fakes; don't sleep through the
     # real propagation allowance.
     import src.trading.polymarket_us.bot as bot_module
+
     bot_module.FILL_POLL_DELAY = 0
     return bot
 
@@ -355,12 +382,12 @@ def test_silent_fill_is_detected_and_hedged():
     locks = find_ladder_locks(LADDER, set(), budget_cents=500)
     spent = bot._place_lock(locks[0], budget_cents=500)
 
-    assert client.positions["p-gte1"] > 0      # long the low rung
-    assert client.positions["p-gte2"] < 0      # short the high rung
+    assert client.positions["p-gte1"] > 0  # long the low rung
+    assert client.positions["p-gte2"] < 0  # short the high rung
     assert abs(client.positions["p-gte1"]) == abs(client.positions["p-gte2"])
     assert spent > 0
     assert bot._halted_reason is None
-    assert client.sells == []                  # nothing to unwind
+    assert client.sells == []  # nothing to unwind
 
 
 def test_silent_no_fill_takes_no_position():
@@ -372,7 +399,7 @@ def test_silent_no_fill_takes_no_position():
 
     assert spent == 0
     assert client.get_positions() == []
-    assert len(client.orders) == 1             # never sent the hedge
+    assert len(client.orders) == 1  # never sent the hedge
     assert bot._halted_reason is None
 
 
@@ -383,7 +410,7 @@ def test_partial_first_leg_is_hedged_at_its_real_size():
     bot._place_lock(locks[0], budget_cents=500)
 
     hedge = [o for o in client.orders if o[1] == "no"][0]
-    assert hedge[2] == 2                       # hedged the fill, not the intent
+    assert hedge[2] == 2  # hedged the fill, not the intent
     assert client.positions["p-gte1"] == 2
     assert client.positions["p-gte2"] == -2
     assert bot._halted_reason is None
@@ -401,7 +428,7 @@ def test_fractional_fill_is_hedged_not_ignored():
     locks = find_ladder_locks(LADDER, set(), budget_cents=500)
     spent = bot._place_lock(locks[0], budget_cents=500)
 
-    assert len(client.orders) == 2              # the NO leg must actually be attempted
+    assert len(client.orders) == 2  # the NO leg must actually be attempted
     assert client.positions["p-gte1"] == 0.3
     assert client.positions["p-gte2"] == -0.3
     assert spent > 0
@@ -421,14 +448,13 @@ def test_unhedgeable_leg_is_flattened():
 
 
 def test_failed_flatten_halts_trading():
-    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 0},
-                        report_status="unknown", sell_fails=True)
+    client = FakeClient(LADDER, fills={"p-gte1": 5, "p-gte2": 0}, report_status="unknown", sell_fails=True)
     bot = make_bot(client)
     locks = find_ladder_locks(LADDER, set(), budget_cents=500)
     bot._place_lock(locks[0], budget_cents=500)
 
     assert bot._halted_reason is not None
-    assert client.positions["p-gte1"] == 5     # still naked, and known to be
+    assert client.positions["p-gte1"] == 5  # still naked, and known to be
 
     # A halted bot keeps reporting but stops committing money.
     before = len(client.orders)
@@ -508,8 +534,9 @@ def test_sports_prop_pairs_require_a_depth_margin():
         make_market("astatc-mlb-nyy-bos-gte1", yes_bid=38, yes_ask=40, ask_depth=4, bid_depth=50),
         make_market("astatc-mlb-nyy-bos-gte2", yes_bid=50, yes_ask=52, bid_depth=4, ask_depth=50),
     ]
-    client = FakeClient(sports, fills={"astatc-mlb-nyy-bos-gte1": 99, "astatc-mlb-nyy-bos-gte2": 99},
-                         report_status="unknown")
+    client = FakeClient(
+        sports, fills={"astatc-mlb-nyy-bos-gte1": 99, "astatc-mlb-nyy-bos-gte2": 99}, report_status="unknown"
+    )
     bot = make_bot(client)
     lock = find_ladder_locks(sports, set(), budget_cents=500)[0]
     assert lock.count > 4 // SPORTS_PROP_DEPTH_MARGIN, "budget alone would have sized past the margin"
@@ -556,18 +583,19 @@ def test_stale_edge_is_rejected_at_requote():
     locks = find_ladder_locks(stale, set(), budget_cents=500)
 
     moved = [
-        make_market("p-gte1", yes_bid=48, yes_ask=50),   # ask rose above the
-        make_market("p-gte2", yes_bid=50, yes_ask=52),   # other rung's bid
+        make_market("p-gte1", yes_bid=48, yes_ask=50),  # ask rose above the
+        make_market("p-gte2", yes_bid=50, yes_ask=52),  # other rung's bid
     ]
     client = FakeClient(moved, fills={"p-gte1": 5, "p-gte2": 5}, report_status="unknown")
     bot = make_bot(client)
     spent = bot._place_lock(locks[0], budget_cents=500)
 
     assert spent == 0
-    assert client.orders == []                 # never sent a thing
+    assert client.orders == []  # never sent a thing
 
 
 # ── Stale NO-side price at placement (2026-08-05 zero-fill incidents) ────────
+
 
 class MovingBookFakeClient(FakeClient):
     """A NO-side book whose bid ticks down between the requote and the
@@ -584,8 +612,9 @@ class MovingBookFakeClient(FakeClient):
     genuinely crosses.
     """
 
-    def __init__(self, markets, sell_slug, buy_slug, initial_bid, moved_bid,
-                 yes_fill_count, balance=500, moved_bid_depth=None):
+    def __init__(
+        self, markets, sell_slug, buy_slug, initial_bid, moved_bid, yes_fill_count, balance=500, moved_bid_depth=None
+    ):
         super().__init__(markets, fills={buy_slug: yes_fill_count}, balance=balance)
         self.sell_slug = sell_slug
         self._bid = initial_bid
@@ -615,8 +644,14 @@ class MovingBookFakeClient(FakeClient):
             filled = min(count, self._fills.get(market_slug, 0))
         signed = filled if side == "yes" else -filled
         self.positions[market_slug] = self.positions.get(market_slug, 0) + signed
-        return Order(order_id="o-" + market_slug, market_slug=market_slug, side=side,
-                     count=count, price_cents=yes_price, status="unknown")
+        return Order(
+            order_id="o-" + market_slug,
+            market_slug=market_slug,
+            side=side,
+            count=count,
+            price_cents=yes_price,
+            status="unknown",
+        )
 
 
 def test_no_leg_repriced_when_book_moves_after_requote():
@@ -631,8 +666,12 @@ def test_no_leg_repriced_when_book_moves_after_requote():
         make_market("p-gte2", yes_bid=50, yes_ask=52),  # requote() sees bid=50
     ]
     client = MovingBookFakeClient(
-        markets, sell_slug="p-gte2", buy_slug="p-gte1",
-        initial_bid=50, moved_bid=47, yes_fill_count=5,
+        markets,
+        sell_slug="p-gte2",
+        buy_slug="p-gte1",
+        initial_bid=50,
+        moved_bid=47,
+        yes_fill_count=5,
     )
     bot = make_bot(client)
     lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
@@ -641,9 +680,9 @@ def test_no_leg_repriced_when_book_moves_after_requote():
 
     no_order = [o for o in client.orders if o[1] == "no"][0]
     assert no_order[3] == 47, "NO leg must be priced off the fresh bid, not the stale requote"
-    assert client.positions["p-gte1"] == 5     # hedged, not flattened
+    assert client.positions["p-gte1"] == 5  # hedged, not flattened
     assert client.positions["p-gte2"] == -5
-    assert client.sells == []                  # no forced unwind
+    assert client.sells == []  # no forced unwind
 
 
 def test_no_leg_skipped_when_book_empties_before_placement():
@@ -656,17 +695,21 @@ def test_no_leg_skipped_when_book_empties_before_placement():
         make_market("p-gte2", yes_bid=50, yes_ask=52),
     ]
     client = MovingBookFakeClient(
-        markets, sell_slug="p-gte2", buy_slug="p-gte1",
-        initial_bid=50, moved_bid=50, yes_fill_count=5, moved_bid_depth=0,
+        markets,
+        sell_slug="p-gte2",
+        buy_slug="p-gte1",
+        initial_bid=50,
+        moved_bid=50,
+        yes_fill_count=5,
+        moved_bid_depth=0,
     )
     bot = make_bot(client)
     lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
 
     bot._place_lock(lock, budget_cents=500)
 
-    assert [o for o in client.orders if o[1] == "no"] == [], \
-        "must not send a NO order into a book with zero depth"
-    assert client.positions["p-gte1"] == 0     # flattened, not left naked
+    assert [o for o in client.orders if o[1] == "no"] == [], "must not send a NO order into a book with zero depth"
+    assert client.positions["p-gte1"] == 0  # flattened, not left naked
     assert client.sells
 
 
@@ -679,17 +722,20 @@ def test_no_leg_skipped_when_refreshed_price_would_lock_in_a_loss():
         make_market("p-gte2", yes_bid=50, yes_ask=52),  # requote() sees bid=50
     ]
     client = MovingBookFakeClient(
-        markets, sell_slug="p-gte2", buy_slug="p-gte1",
-        initial_bid=50, moved_bid=35, yes_fill_count=5,  # 40 + (100-35) > 100
+        markets,
+        sell_slug="p-gte2",
+        buy_slug="p-gte1",
+        initial_bid=50,
+        moved_bid=35,
+        yes_fill_count=5,  # 40 + (100-35) > 100
     )
     bot = make_bot(client)
     lock = find_ladder_locks(markets, set(), budget_cents=500)[0]
 
     bot._place_lock(lock, budget_cents=500)
 
-    assert [o for o in client.orders if o[1] == "no"] == [], \
-        "must not send a NO order priced to lock in a loss"
-    assert client.positions["p-gte1"] == 0     # flattened, not left naked
+    assert [o for o in client.orders if o[1] == "no"] == [], "must not send a NO order priced to lock in a loss"
+    assert client.positions["p-gte1"] == 0  # flattened, not left naked
     assert client.sells
 
 
@@ -698,6 +744,7 @@ def test_no_leg_falls_back_to_last_quote_if_refresh_fails():
     hedge attempt outright — fall back to the last-known price, exactly
     as today, and let the existing flatten-or-halt path handle whatever
     happens next."""
+
     class FlakyRefreshClient(FakeClient):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
@@ -717,12 +764,13 @@ def test_no_leg_falls_back_to_last_quote_if_refresh_fails():
     bot._place_lock(lock, budget_cents=500)
 
     no_order = [o for o in client.orders if o[1] == "no"][0]
-    assert no_order[3] == 50   # fell back to the original _requote() price
+    assert no_order[3] == 50  # fell back to the original _requote() price
     assert client.positions["p-gte1"] == 5
     assert bot._halted_reason is None
 
 
 # ── Minimum-balance floor ─────────────────────────────────────────────────────
+
 
 def test_scan_halts_and_stops_trading_at_the_balance_floor():
     """A bad stretch must stop on its own before the stake is gone, not after."""
@@ -759,6 +807,7 @@ def test_scan_publishes_held_slugs_for_other_live_bots_to_read(tmp_path, monkeyp
     import json
 
     from src.trading.polymarket_us.bot import HELD_SLUGS_PATH
+
     payload = json.loads(HELD_SLUGS_PATH.read_text())
     assert payload["slugs"] == ["astatc-mlb-az-bos-2026-08-17-er-mitbra-gte1"]
     assert payload["updated_ts"]

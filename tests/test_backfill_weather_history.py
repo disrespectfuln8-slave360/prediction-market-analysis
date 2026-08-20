@@ -7,6 +7,7 @@ can safely re-run on a schedule: get it wrong and either days get skipped
 (a real gap in Apex's calibration data) or re-processed (duplicate rows
 corrupting the calibration table's sample counts).
 """
+
 from __future__ import annotations
 
 import sys
@@ -30,10 +31,12 @@ def test_resume_start_date_falls_back_to_start_date_when_no_file_exists():
 
 
 def test_resume_start_date_is_the_day_after_the_latest_row():
-    df = pd.DataFrame([
-        {"city": "nychigh", "date": "2026-08-10", "settlement": 1},
-        {"city": "nychigh", "date": "2026-08-12", "settlement": 0},
-    ])
+    df = pd.DataFrame(
+        [
+            {"city": "nychigh", "date": "2026-08-10", "settlement": 1},
+            {"city": "nychigh", "date": "2026-08-12", "settlement": 0},
+        ]
+    )
     df.to_parquet(bwh.OUT_PATH)
 
     assert bwh._resume_start_date() == "2026-08-13"

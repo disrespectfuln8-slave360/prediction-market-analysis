@@ -6,6 +6,7 @@ verified live against the real MLB Stats API rather than unit-tested here
 functions are thin orchestration around real_stat_value/find_player, which
 carry the actual logic and are fully testable with plain fixture data.
 """
+
 from __future__ import annotations
 
 from src.trading.polymarket_us.mlb_stats_verification import (
@@ -23,6 +24,7 @@ def _player(batting=None, pitching=None, name="Jake Cronenworth"):
 
 
 # ── real_stat_value: batter stats ───────────────────────────────────────────
+
 
 def test_total_bases_reads_the_real_value():
     p = _player(batting={"totalBases": 2, "hits": 1})
@@ -54,6 +56,7 @@ def test_empty_batting_stats_is_zero_not_none():
 
 # ── real_stat_value: hrr (hits + runs + rbi) ────────────────────────────────
 
+
 def test_hrr_sums_hits_runs_and_rbi():
     # Real example verified live: Ke'Bryan Hayes, 1 hit + 0 runs + 0 rbi = 1,
     # matching a recorded gte2 -> NO settlement.
@@ -67,6 +70,7 @@ def test_hrr_empty_batting_is_zero():
 
 
 # ── real_stat_value: pitcher stats ──────────────────────────────────────────
+
 
 def test_outs_converts_innings_pitched_to_three_per_inning():
     p = _player(pitching={"inningsPitched": "6.1"})
@@ -102,11 +106,14 @@ def test_unknown_stat_key_returns_none():
 
 # ── find_player ──────────────────────────────────────────────────────────────
 
+
 def test_find_player_matches_case_insensitively():
-    box = {"teams": {
-        "away": {"players": {"12": _player(name="Jake Cronenworth")}},
-        "home": {"players": {}},
-    }}
+    box = {
+        "teams": {
+            "away": {"players": {"12": _player(name="Jake Cronenworth")}},
+            "home": {"players": {}},
+        }
+    }
     assert find_player(box, "JAKE CRONENWORTH") is not None
 
 
@@ -120,6 +127,7 @@ def test_find_player_returns_none_for_a_missing_boxscore():
 
 
 # ── verify_settlement: fallback behavior on failure ─────────────────────────
+
 
 class _RaisingClient:
     def get_market(self, slug):

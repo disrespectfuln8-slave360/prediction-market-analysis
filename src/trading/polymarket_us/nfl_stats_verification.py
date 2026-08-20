@@ -25,15 +25,25 @@ READ-ONLY: only httpx GETs to site.api.espn.com and the caller's own
 client.get_market() are ever used. Never places, cancels, or touches an
 order.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 import httpx
 
 TEAM_CODE_TO_ABBR = {
-    "den": "DEN", "atl": "ATL", "tb": "TB", "nyj": "NYJ", "mia": "MIA", "was": "WSH", "wsh": "WSH",
-    "dal": "DAL", "sea": "SEA", "phi": "PHI", "bal": "BAL", "min": "MIN", "nyg": "NYG",
+    "den": "DEN",
+    "atl": "ATL",
+    "tb": "TB",
+    "nyj": "NYJ",
+    "mia": "MIA",
+    "was": "WSH",
+    "wsh": "WSH",
+    "dal": "DAL",
+    "sea": "SEA",
+    "phi": "PHI",
+    "bal": "BAL",
+    "min": "MIN",
+    "nyg": "NYG",
 }
 
 _HTTP_TIMEOUT = 20
@@ -46,24 +56,31 @@ def get_boxscore_for(date: str, team_codes: list, scoreboard_cache: dict):
     caches."""
     if date not in scoreboard_cache:
         yyyymmdd = date.replace("-", "")
-        r = httpx.get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
-                       params={"dates": yyyymmdd}, timeout=_HTTP_TIMEOUT)
+        r = httpx.get(
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+            params={"dates": yyyymmdd},
+            timeout=_HTTP_TIMEOUT,
+        )
         r.raise_for_status()
         scoreboard_cache[date] = r.json()
     data = scoreboard_cache[date]
     wanted = {TEAM_CODE_TO_ABBR.get(tc, tc.upper()) for tc in team_codes}
     for event in data.get("events", []):
-        abbrs = {c.get("team", {}).get("abbreviation")
-                 for c in event.get("competitions", [{}])[0].get("competitors", [])}
+        abbrs = {
+            c.get("team", {}).get("abbreviation") for c in event.get("competitions", [{}])[0].get("competitors", [])
+        }
         if wanted & abbrs:
-            r2 = httpx.get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary",
-                            params={"event": event["id"]}, timeout=_HTTP_TIMEOUT)
+            r2 = httpx.get(
+                "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary",
+                params={"event": event["id"]},
+                timeout=_HTTP_TIMEOUT,
+            )
             r2.raise_for_status()
             return r2.json()
     return None
 
 
-def real_stat_value(boxscore: Optional[dict], full_name: str, stat_key: str) -> Optional[int]:
+def real_stat_value(boxscore: dict | None, full_name: str, stat_key: str) -> int | None:
     """The real value for `stat_key` from this game's box score, or None if
     the player can't be found in any relevant statistical category at all
     (unlike the MLB module, ESPN's boxscore only lists athletes who
@@ -126,7 +143,7 @@ def real_stat_value(boxscore: Optional[dict], full_name: str, stat_key: str) -> 
     return None
 
 
-def verify_settlement(client, slug: str, meta: dict, scoreboard_cache: dict) -> Optional[bool]:
+def verify_settlement(client, slug: str, meta: dict, scoreboard_cache: dict) -> bool | None:
     """The REAL outcome_yes for an astatc-nfl-* per-game matchup prop,
     verified against ESPN's real box score, or None if undeterminable --
     callers must fall back to trusting the exchange's own settlement.

@@ -7,13 +7,15 @@ and completes Phase 1 in minutes instead of hours.
 
 Run once: python backfill_history.py
 """
+
 from __future__ import annotations
+
 import sys
 import time
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -21,21 +23,35 @@ from tqdm import tqdm
 
 from src.common.client import HttpClient
 from src.common.storage import ParquetStorage
-from src.indexers.kalshi.client import KalshiClient, KALSHI_API_HOST
+from src.indexers.kalshi.client import KALSHI_API_HOST, KalshiClient
 from src.indexers.kalshi.models import Market
 
 MARKETS_DIR = Path("data/kalshi/markets")
-TRADES_DIR  = Path("data/kalshi/trades")
+TRADES_DIR = Path("data/kalshi/trades")
 
 # Only fetch the series the bots actually trade
 BOT_SERIES = [
-    "KXBTC", "KXETH", "KXSOL", "KXDOGE",
-    "KXINX", "KXNDX", "KXSPY", "KXDJI",
-    "INX", "NDX", "NASDAQ", "FED", "FOMC", "CPI", "JOBS", "GDP", "UNRATE",
+    "KXBTC",
+    "KXETH",
+    "KXSOL",
+    "KXDOGE",
+    "KXINX",
+    "KXNDX",
+    "KXSPY",
+    "KXDJI",
+    "INX",
+    "NDX",
+    "NASDAQ",
+    "FED",
+    "FOMC",
+    "CPI",
+    "JOBS",
+    "GDP",
+    "UNRATE",
 ]
 
 MAX_TRADE_WORKERS = 5
-TRADE_BATCH_SIZE  = 10_000
+TRADE_BATCH_SIZE = 10_000
 
 
 def _client(rate: float = 4, retries: int = 15) -> KalshiClient:
@@ -45,6 +61,7 @@ def _client(rate: float = 4, retries: int = 15) -> KalshiClient:
 
 
 # ── PHASE 1: market metadata via events API ───────────────────────────────────
+
 
 def fetch_series_markets(series: str, client: KalshiClient, storage: ParquetStorage) -> int:
     """Fetch all finalized markets for one series via the events endpoint."""
@@ -86,7 +103,7 @@ def fetch_series_markets(series: str, client: KalshiClient, storage: ParquetStor
 def fetch_historical_markets() -> int:
     print(f"Phase 1: fetching finalized markets for {len(BOT_SERIES)} series via events API")
     MARKETS_DIR.mkdir(parents=True, exist_ok=True)
-    client  = _client(rate=4)
+    client = _client(rate=4)
     storage = ParquetStorage(data_dir=MARKETS_DIR)
     grand_total = 0
     try:
@@ -102,16 +119,15 @@ def fetch_historical_markets() -> int:
 
 # ── PHASE 2: trades for newly discovered markets ──────────────────────────────
 
+
 def fetch_missing_trades() -> int:
     print("Phase 2: fetching trades for finalized bot-series markets")
 
     # Load existing trade tickers
-    existing_ids:     set[str] = set()
+    existing_ids: set[str] = set()
     existing_tickers: set[str] = set()
     if list(TRADES_DIR.glob("*.parquet")):
-        rows = duckdb.sql(
-            f"SELECT DISTINCT trade_id, ticker FROM '{TRADES_DIR}/trades_*.parquet'"
-        ).fetchall()
+        rows = duckdb.sql(f"SELECT DISTINCT trade_id, ticker FROM '{TRADES_DIR}/trades_*.parquet'").fetchall()
         for tid, tk in rows:
             existing_ids.add(tid)
             existing_tickers.add(tk)
@@ -130,7 +146,7 @@ def fetch_missing_trades() -> int:
           AND ({series_filter})
     """).fetchall()
     all_tickers = [r[0] for r in rows]
-    to_fetch    = [t for t in all_tickers if t not in existing_tickers]
+    to_fetch = [t for t in all_tickers if t not in existing_tickers]
     print(f"  {len(all_tickers):,} finalized liquid markets, {len(to_fetch):,} need trades")
 
     if not to_fetch:
@@ -145,22 +161,24 @@ def fetch_missing_trades() -> int:
         for f in existing_files:
             parts = f.stem.split("_")
             if len(parts) >= 2:
-                try: idxs.append(int(parts[1]))
-                except ValueError: pass
+                try:
+                    idxs.append(int(parts[1]))
+                except ValueError:
+                    pass
         if idxs:
             next_idx = max(idxs) + TRADE_BATCH_SIZE
 
     buffer: list[dict] = []
     total_saved = 0
-    chunk_idx   = next_idx
+    chunk_idx = next_idx
 
     def save_batch(batch: list[dict]):
         nonlocal chunk_idx, total_saved
         if not batch:
             return
-        path = TRADES_DIR / f"trades_{chunk_idx}_{chunk_idx+TRADE_BATCH_SIZE}.parquet"
+        path = TRADES_DIR / f"trades_{chunk_idx}_{chunk_idx + TRADE_BATCH_SIZE}.parquet"
         pd.DataFrame(batch).to_parquet(path)
-        chunk_idx   += TRADE_BATCH_SIZE
+        chunk_idx += TRADE_BATCH_SIZE
         total_saved += len(batch)
 
     def fetch_ticker(ticker: str) -> list[dict]:
@@ -170,11 +188,7 @@ def fetch_missing_trades() -> int:
             if not trades:
                 return []
             ts = datetime.utcnow()
-            return [
-                {**asdict(t), "_fetched_at": ts}
-                for t in trades
-                if t.trade_id not in existing_ids
-            ]
+            return [{**asdict(t), "_fetched_at": ts} for t in trades if t.trade_id not in existing_ids]
         finally:
             c.close()
 
@@ -219,6 +233,7 @@ def fetch_missing_trades() -> int:
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 
+
 def print_model_coverage():
     try:
         df = duckdb.sql(f"""
@@ -250,4 +265,4 @@ if __name__ == "__main__":
     fetch_historical_markets()
     fetch_missing_trades()
     print_model_coverage()
-    print(f"\nTotal time: {(time.time()-t0)/60:.1f} min")
+    print(f"\nTotal time: {(time.time() - t0) / 60:.1f} min")

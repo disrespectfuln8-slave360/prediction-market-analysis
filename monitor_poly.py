@@ -11,6 +11,7 @@ Watches:
 
 Logs to monitor_poly.log and stdout. Run alongside run_poly.py.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,73 +35,69 @@ log = logging.getLogger("monitor_poly")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-BOT_LOG       = Path("bot_poly_err.log")
+BOT_LOG = Path("bot_poly_err.log")
 LEARNING_FILE = Path("data/polymarket/learning.json")
 
-CHECK_INTERVAL     = 60    # seconds between log-tail passes
-LEARNING_INTERVAL  = 600   # seconds between learning-file checks (10 min)
-WIN_RATE_MIN_PTS   = 20    # warn if fewer price points loaded than this
-ZERO_OPPS_WARN     = 5     # warn after this many consecutive zero-opp scans
-BALANCE_DROP_PCT   = 5.0   # warn if balance drops more than this % in one scan
-MAX_ERRORS_PER_HR  = 5     # suppress error spam beyond this
-MIN_BETS_BUCKET    = 10    # matches learning.py MIN_BETS_FOR_ADJUSTMENT
-CONV_NO_SIGNAL_WARN = 10   # warn after this many consecutive no-signal scans
+CHECK_INTERVAL = 60  # seconds between log-tail passes
+LEARNING_INTERVAL = 600  # seconds between learning-file checks (10 min)
+WIN_RATE_MIN_PTS = 20  # warn if fewer price points loaded than this
+ZERO_OPPS_WARN = 5  # warn after this many consecutive zero-opp scans
+BALANCE_DROP_PCT = 5.0  # warn if balance drops more than this % in one scan
+MAX_ERRORS_PER_HR = 5  # suppress error spam beyond this
+MIN_BETS_BUCKET = 10  # matches learning.py MIN_BETS_FOR_ADJUSTMENT
+CONV_NO_SIGNAL_WARN = 10  # warn after this many consecutive no-signal scans
 
 # ── Patterns ──────────────────────────────────────────────────────────────────
 
 _PAT_WIN_RATES = re.compile(r"Win rates loaded: (\d+) price")
-_PAT_SCAN      = re.compile(
+_PAT_SCAN = re.compile(
     r"\[(\d{2}:\d{2}:\d{2})\] balance=\$([\d.]+) \(budget=\$([\d.]+)\)"
     r"  markets=(\d+)  opps=(\d+)  positions=(\d+)  slots=(\d+)"
 )
-_PAT_BET       = re.compile(
-    r"Placed BUY (.+?) on (\S+) \(.*?\): (\d+)x @ (\d+)\S.*edge=([\d.]+)pp"
-)
-_PAT_SETTLE    = re.compile(
-    r"Learning: (\S+) (YES|NO)@(\d+)\S -> (WIN|LOSS)  P&L=([+-]\d+)\S"
-)
-_PAT_ERROR     = re.compile(r"\bERROR\b")
+_PAT_BET = re.compile(r"Placed BUY (.+?) on (\S+) \(.*?\): (\d+)x @ (\d+)\S.*edge=([\d.]+)pp")
+_PAT_SETTLE = re.compile(r"Learning: (\S+) (YES|NO)@(\d+)\S -> (WIN|LOSS)  P&L=([+-]\d+)\S")
+_PAT_ERROR = re.compile(r"\bERROR\b")
 # Convergence bot
-_PAT_CONV_BET  = re.compile(
+_PAT_CONV_BET = re.compile(
     r"\[convergence\] BET (.+?) on (\S+): (\d+)x@(\d+)\S\s+"
     r"prob=([\d.]+)%\s+edge=\+([\d.]+)pp\s+(\w+)=\$([\d,.]+)"
 )
 _PAT_CONV_NOSIG = re.compile(r"\[convergence\] No signals")
-_PAT_CONV_SIG   = re.compile(r"\[convergence\] (\d+) signal")
+_PAT_CONV_SIG = re.compile(r"\[convergence\] (\d+) signal")
 
 # ── Mutable state ─────────────────────────────────────────────────────────────
 
+
 class _S:
-    log_pos:               int   = 0
-    win_rates_loaded:      bool  = False
-    win_rate_points:       int   = 0
-    consecutive_zero_opps: int   = 0
-    last_balance:          float | None = None
-    errors_this_hour:      int   = 0
-    error_hour_start:      float = time.monotonic()
-    last_learning_check:   float = 0.0
-    session_pnl_cents:     int   = 0
-    conv_bets:             int   = 0
-    conv_no_signal_streak: int   = 0
+    log_pos: int = 0
+    win_rates_loaded: bool = False
+    win_rate_points: int = 0
+    consecutive_zero_opps: int = 0
+    last_balance: float | None = None
+    errors_this_hour: int = 0
+    error_hour_start: float = time.monotonic()
+    last_learning_check: float = 0.0
+    session_pnl_cents: int = 0
+    conv_bets: int = 0
+    conv_no_signal_streak: int = 0
+
 
 S = _S()
 
 # ── Log processing ────────────────────────────────────────────────────────────
 
+
 def _process_lines(lines: list[str]) -> None:
     for line in lines:
-
         # 1 — Win-rate model loaded
         m = _PAT_WIN_RATES.search(line)
         if m:
             n = int(m.group(1))
             S.win_rates_loaded = True
-            S.win_rate_points  = n
+            S.win_rate_points = n
             S.consecutive_zero_opps = 0
             if n < WIN_RATE_MIN_PTS:
-                log.warning(
-                    "[WIN-RATE] Loaded only %d price points — too sparse, bots may not trade", n
-                )
+                log.warning("[WIN-RATE] Loaded only %d price points — too sparse, bots may not trade", n)
             else:
                 log.info("[WIN-RATE] Loaded %d price points — bots are ready to trade", n)
             continue
@@ -117,7 +114,9 @@ def _process_lines(lines: list[str]) -> None:
                 if drop_pct >= BALANCE_DROP_PCT:
                     log.warning(
                         "[BALANCE] Drop of %.1f%%: $%.2f -> $%.2f",
-                        drop_pct, S.last_balance, bal,
+                        drop_pct,
+                        S.last_balance,
+                        bal,
                     )
             S.last_balance = bal
 
@@ -137,7 +136,9 @@ def _process_lines(lines: list[str]) -> None:
                             "[OPPS] %d consecutive scans with zero opportunities "
                             "(win-rate pts=%d, markets=%d) — "
                             "edge threshold may be too tight or price range too narrow",
-                            S.consecutive_zero_opps, S.win_rate_points, markets,
+                            S.consecutive_zero_opps,
+                            S.win_rate_points,
+                            markets,
                         )
                 else:
                     if S.consecutive_zero_opps >= ZERO_OPPS_WARN:
@@ -162,7 +163,12 @@ def _process_lines(lines: list[str]) -> None:
             S.session_pnl_cents += int(pnl)
             log.info(
                 "[SETTLED] %s %s@%s¢ -> %s  P&L=%s¢  (session total: %+d¢)",
-                condition_id, side, price, result, pnl, S.session_pnl_cents,
+                condition_id,
+                side,
+                price,
+                result,
+                pnl,
+                S.session_pnl_cents,
             )
             continue
 
@@ -173,9 +179,16 @@ def _process_lines(lines: list[str]) -> None:
             S.conv_bets += 1
             S.conv_no_signal_streak = 0
             log.info(
-                "[CONVERGENCE] BET %s on %s: %sx@%s¢  prob=%s%%  edge=+%spp  "
-                "%s=$%s  (session bets: %d)",
-                outcome, condition_id, qty, price, prob, edge, coin, spot, S.conv_bets,
+                "[CONVERGENCE] BET %s on %s: %sx@%s¢  prob=%s%%  edge=+%spp  %s=$%s  (session bets: %d)",
+                outcome,
+                condition_id,
+                qty,
+                price,
+                prob,
+                edge,
+                coin,
+                spot,
+                S.conv_bets,
             )
             continue
 
@@ -210,6 +223,7 @@ def _process_lines(lines: list[str]) -> None:
 
 # ── Learning checker ──────────────────────────────────────────────────────────
 
+
 def _check_learning() -> None:
     if not LEARNING_FILE.exists():
         log.debug("[LEARNING] File not found yet")
@@ -224,7 +238,7 @@ def _check_learning() -> None:
         log.warning("[LEARNING] Unexpected content in %s (expected a JSON object)", LEARNING_FILE)
         return
 
-    bets    = data.get("bets", [])
+    bets = data.get("bets", [])
     pending = [b for b in bets if not b.get("result")]
     settled = [b for b in bets if b.get("result")]
 
@@ -246,33 +260,30 @@ def _check_learning() -> None:
             buckets[key]["preds"].append(b["predicted_win_rate"])
 
     adjusting = {k: v for k, v in buckets.items() if v["total"] >= MIN_BETS_BUCKET}
-    building  = {k: v for k, v in buckets.items() if v["total"] <  MIN_BETS_BUCKET}
+    building = {k: v for k, v in buckets.items() if v["total"] < MIN_BETS_BUCKET}
 
     total_pnl = sum(b.get("profit_cents") or 0 for b in settled)
     wins = sum(1 for b in settled if b.get("result") == "win")
-    wr   = 100 * wins / len(settled) if settled else 0.0
+    wr = 100 * wins / len(settled) if settled else 0.0
 
     lines = [
         f"[LEARNING] {len(bets)} total  {len(pending)} pending  {len(settled)} settled"
-        f"  win-rate={wr:.0f}%  P&L={total_pnl:+d}¢ (${total_pnl/100:+.2f})"
+        f"  win-rate={wr:.0f}%  P&L={total_pnl:+d}¢ (${total_pnl / 100:+.2f})"
         f"  |  {len(adjusting)} buckets adjusting  {len(building)} buckets building"
     ]
 
     for (series, side, bucket), v in sorted(adjusting.items()):
-        actual_wr  = 100 * v["wins"] / v["total"]
-        avg_pred   = sum(v["preds"]) / len(v["preds"]) if v["preds"] else 0.0
-        adj        = round(max(0.0, min(6.0, (avg_pred - actual_wr) * 0.5)), 2)
-        status     = f"adj=+{adj:.1f}pp" if adj > 0 else "adj=none (on-target)"
+        actual_wr = 100 * v["wins"] / v["total"]
+        avg_pred = sum(v["preds"]) / len(v["preds"]) if v["preds"] else 0.0
+        adj = round(max(0.0, min(6.0, (avg_pred - actual_wr) * 0.5)), 2)
+        status = f"adj=+{adj:.1f}pp" if adj > 0 else "adj=none (on-target)"
         lines.append(
-            f"  ADJUSTING [{series} {side.upper()} {bucket}-{bucket+9}¢]"
+            f"  ADJUSTING [{series} {side.upper()} {bucket}-{bucket + 9}¢]"
             f"  n={v['total']}  actual={actual_wr:.0f}%  pred={avg_pred:.0f}%  {status}"
         )
 
     for (series, side, bucket), v in sorted(building.items(), key=lambda x: -x[1]["total"])[:5]:
-        lines.append(
-            f"  BUILDING  [{series} {side.upper()} {bucket}-{bucket+9}¢]"
-            f"  n={v['total']}/{MIN_BETS_BUCKET}"
-        )
+        lines.append(f"  BUILDING  [{series} {side.upper()} {bucket}-{bucket + 9}¢]  n={v['total']}/{MIN_BETS_BUCKET}")
 
     if len(pending) > 20:
         log.warning(
@@ -285,16 +296,20 @@ def _check_learning() -> None:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     log.info("=" * 70)
     log.info("Polymarket monitor started")
     log.info("  Watching : %s", BOT_LOG)
     log.info("  Learning : %s", LEARNING_FILE)
-    log.info("  Alerts   : win-rate load, zero-opps streak (%d), "
-             "balance drop (%.0f%%), position cap, errors, convergence no-signal (%d)",
-             ZERO_OPPS_WARN, BALANCE_DROP_PCT, CONV_NO_SIGNAL_WARN)
-    log.info("  Cycle    : log-tail every %ds, learning check every %ds",
-             CHECK_INTERVAL, LEARNING_INTERVAL)
+    log.info(
+        "  Alerts   : win-rate load, zero-opps streak (%d), "
+        "balance drop (%.0f%%), position cap, errors, convergence no-signal (%d)",
+        ZERO_OPPS_WARN,
+        BALANCE_DROP_PCT,
+        CONV_NO_SIGNAL_WARN,
+    )
+    log.info("  Cycle    : log-tail every %ds, learning check every %ds", CHECK_INTERVAL, LEARNING_INTERVAL)
     log.info("=" * 70)
 
     while True:
@@ -303,7 +318,7 @@ def main() -> None:
                 size = BOT_LOG.stat().st_size
                 if size != S.log_pos:
                     if size < S.log_pos:
-                        S.log_pos = 0          # log was rotated
+                        S.log_pos = 0  # log was rotated
                     with open(BOT_LOG, encoding="utf-8", errors="ignore") as f:
                         f.seek(S.log_pos)
                         new_text = f.read()

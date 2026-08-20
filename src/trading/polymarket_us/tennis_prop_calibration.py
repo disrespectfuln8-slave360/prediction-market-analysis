@@ -19,6 +19,7 @@ Data sources (written by tennis_prop_quote_logger.py):
     data/polymarket_us/tennis_prop_quotes.jsonl
     data/polymarket_us/tennis_prop_settlements.jsonl
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,6 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class TennisPropGrounding:
     calibration_trustworthy: bool
     calibration_note: str
     calibration_sample_count: int
-    calibration_actual_rate: Optional[float]
+    calibration_actual_rate: float | None
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -117,7 +117,7 @@ def _build_calibration_table(quotes: list[dict], settlements: list[dict]) -> dic
 
     for cat in table.values():
         for side_table in (cat["yes"], cat["no"]):
-            for decile, d in side_table.items():
+            for _decile, d in side_table.items():
                 d["actual_rate"] = 100.0 * d["wins"] / d["count"] if d["count"] else 0.0
 
     return table
@@ -132,7 +132,7 @@ class TennisPropCalibrationEngine:
         self.quotes_path = quotes_path
         self.settlements_path = settlements_path
         self._table: dict[str, dict[str, dict[int, dict]]] = {}
-        self._last_settlement_ts: Optional[str] = None
+        self._last_settlement_ts: str | None = None
         self.reload()
 
     def reload(self) -> None:
@@ -143,10 +143,12 @@ class TennisPropCalibrationEngine:
         self._last_settlement_ts = max(timestamps) if timestamps else None
         logger.info(
             "[tennis_prop_calibration] Loaded %d settlements across %d categories, latest %s",
-            len(settlements), len(self._table), self._last_settlement_ts,
+            len(settlements),
+            len(self._table),
+            self._last_settlement_ts,
         )
 
-    def data_is_stale(self, now: Optional[datetime] = None) -> bool:
+    def data_is_stale(self, now: datetime | None = None) -> bool:
         if self._last_settlement_ts is None:
             return True
         now = now or datetime.now(timezone.utc)
@@ -156,7 +158,7 @@ class TennisPropCalibrationEngine:
             return True
         return (now - latest).days > STALE_DATA_DAYS
 
-    def _trustworthiness(self, category: str, side: str, price_cents: int) -> tuple[bool, str, int, Optional[float]]:
+    def _trustworthiness(self, category: str, side: str, price_cents: int) -> tuple[bool, str, int, float | None]:
         cat = self._table.get(category)
         decile = _decile_low(price_cents)
         if cat is None:
@@ -164,30 +166,49 @@ class TennisPropCalibrationEngine:
         info = cat[side].get(decile)
         if info is None or info["count"] < MIN_SAMPLE_FLOOR:
             count = info["count"] if info else 0
-            return False, (
-                f"only {count} historical {side} sample(s) in the {decile}-{decile + 10}% "
-                f"range for {category} (need {MIN_SAMPLE_FLOOR})"
-            ), count, (info["actual_rate"] if info else None)
+            return (
+                False,
+                (
+                    f"only {count} historical {side} sample(s) in the {decile}-{decile + 10}% "
+                    f"range for {category} (need {MIN_SAMPLE_FLOOR})"
+                ),
+                count,
+                (info["actual_rate"] if info else None),
+            )
         midpoint = decile + 5
         error = abs(info["actual_rate"] - midpoint)
         if error > MAX_CALIBRATION_ERROR_PCT:
-            return False, (
-                f"{category} {side} measured {error:.1f}pp off the {decile}-{decile + 10}% "
-                f"range's midpoint ({info['count']} samples) — exceeds the "
-                f"{MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
-            ), info["count"], info["actual_rate"]
-        return True, (
-            f"calibration OK: {info['count']} samples, actual rate {info['actual_rate']:.1f}% "
-            f"in the {decile}-{decile + 10}% range"
-        ), info["count"], info["actual_rate"]
+            return (
+                False,
+                (
+                    f"{category} {side} measured {error:.1f}pp off the {decile}-{decile + 10}% "
+                    f"range's midpoint ({info['count']} samples) — exceeds the "
+                    f"{MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
+                ),
+                info["count"],
+                info["actual_rate"],
+            )
+        return (
+            True,
+            (
+                f"calibration OK: {info['count']} samples, actual rate {info['actual_rate']:.1f}% "
+                f"in the {decile}-{decile + 10}% range"
+            ),
+            info["count"],
+            info["actual_rate"],
+        )
 
     def evaluate(self, category: str, side: str, price_cents: int) -> TennisPropGrounding:
         """side is "yes" (cost = price_cents) or "no" (cost = 100 - yes_bid,
         already converted by the caller before price_cents is passed in)."""
         trustworthy, note, count, actual_rate = self._trustworthiness(category, side, price_cents)
         return TennisPropGrounding(
-            category=category, side=side, price_cents=price_cents,
+            category=category,
+            side=side,
+            price_cents=price_cents,
             implied_prob=price_cents / 100.0,
-            calibration_trustworthy=trustworthy, calibration_note=note,
-            calibration_sample_count=count, calibration_actual_rate=actual_rate,
+            calibration_trustworthy=trustworthy,
+            calibration_note=note,
+            calibration_sample_count=count,
+            calibration_actual_rate=actual_rate,
         )

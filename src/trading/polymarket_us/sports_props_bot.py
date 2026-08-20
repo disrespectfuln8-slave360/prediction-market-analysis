@@ -39,13 +39,13 @@ incident 2026-08-17: 4 of 6 real trades that day all drew on the identical
 0.20-ish-probability draws. Guarded separately below (held_buckets) since
 it's orthogonal to the per-game guard -- two different games, same signal.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 from src.trading.polymarket_us import sports_props_llm as llm
 from src.trading.polymarket_us.apex import risk
@@ -78,6 +78,7 @@ def _ladder_bot_held_slugs() -> set[str]:
     except Exception:
         return set()
 
+
 FILL_POLL_ATTEMPTS = 5
 FILL_POLL_DELAY = 1.0
 FILL_EPSILON = 1e-6
@@ -97,7 +98,7 @@ def _model_prob(grounding) -> float:
     return (grounding.calibration_actual_rate or 0.0) / 100.0
 
 
-def _parse_any_prop_slug(slug: str) -> Optional[dict]:
+def _parse_any_prop_slug(slug: str) -> dict | None:
     """Tries every per-game-matchup sport family this bot trades: MLB (the
     shared sports_prop_quote_logger.py) and NFL (its own dedicated module,
     split out 2026-08-17 so NFL's per-game matchup props get their own data
@@ -111,7 +112,7 @@ def _parse_any_prop_slug(slug: str) -> Optional[dict]:
     return parse_nfl_prop_slug(slug)
 
 
-def _game_key(slug: str) -> Optional[tuple]:
+def _game_key(slug: str) -> tuple | None:
     meta = _parse_any_prop_slug(slug)
     if meta is None:
         return None
@@ -126,7 +127,7 @@ def _bucket_key(sport: str, stat: str, side: str, price_cents: int) -> tuple:
     return (sport, stat, side, _decile_low(price_cents))
 
 
-def _trade_bucket_key(trade: dict) -> Optional[tuple]:
+def _trade_bucket_key(trade: dict) -> tuple | None:
     meta = _parse_any_prop_slug(trade["market_slug"])
     if meta is None:
         return None
@@ -137,8 +138,8 @@ class SportsPropsBot:
     def __init__(
         self,
         client,
-        memory: Optional[ApexMemory] = None,
-        calibration: Optional[SportsPropCalibrationEngine] = None,
+        memory: ApexMemory | None = None,
+        calibration: SportsPropCalibrationEngine | None = None,
         poll_interval: int = 300,
         allowed_sports: tuple[str, ...] = ("mlb", "nfl"),
     ):
@@ -193,8 +194,12 @@ class SportsPropsBot:
             pnl_cents = self.memory.record_settlement(trade["id"], outcome_yes, payout_cents)
             logger.info(
                 "[sports_props] SETTLED %s -> %s  %sx %s  pnl=%+d¢  bankroll=$%.2f",
-                slug, "YES" if outcome_yes else "NO", _fmt_qty(trade["count"]), trade["side"].upper(),
-                pnl_cents or 0, self.memory.bankroll_cents / 100,
+                slug,
+                "YES" if outcome_yes else "NO",
+                _fmt_qty(trade["count"]),
+                trade["side"].upper(),
+                pnl_cents or 0,
+                self.memory.bankroll_cents / 100,
             )
             miss = abs(trade["model_prob"] - (1.0 if won else 0.0))
             if miss >= 0.5 and (pnl_cents or 0) < 0:
@@ -253,19 +258,21 @@ class SportsPropsBot:
             logger.info(
                 "[sports_props] %d live position(s) excluded from the stray check -- "
                 "attributed to the ladder bot's own published holdings: %s",
-                len(attributed), sorted(attributed),
+                len(attributed),
+                sorted(attributed),
             )
 
         missing = tracked_slugs - live_slugs
         if missing:
             logger.warning(
                 "[sports_props] memory shows open position(s) the live account no longer holds: %s "
-                "(may be a settlement not yet reconciled)", sorted(missing),
+                "(may be a settlement not yet reconciled)",
+                sorted(missing),
             )
 
     # ── Bucket selection ─────────────────────────────────────────────────────
 
-    def _best_bucket_for_game(self, buckets: list) -> Optional[tuple]:
+    def _best_bucket_for_game(self, buckets: list) -> tuple | None:
         """Highest-edge tradeable bucket across every stat/player in one
         game, or None. Priced off the bulk scan's quotes as a coarse
         filter; the caller re-quotes the chosen candidate before sizing."""
@@ -286,7 +293,7 @@ class SportsPropsBot:
                         best = (edge, "no", slug, meta, grounding)
         return best
 
-    def _requote_bucket(self, slug: str, side: str) -> Optional[tuple]:
+    def _requote_bucket(self, slug: str, side: str) -> tuple | None:
         try:
             fresh = self.client.get_market(slug)
         except Exception as exc:
@@ -305,16 +312,25 @@ class SportsPropsBot:
     # ── Order placement ──────────────────────────────────────────────────────
 
     def _place_decision(
-        self, side: str, slug: str, meta: dict, order_yes_price: int, cost_price_cents: int,
-        model_prob_for_side: float, decision: risk.ApexDecision,
+        self,
+        side: str,
+        slug: str,
+        meta: dict,
+        order_yes_price: int,
+        cost_price_cents: int,
+        model_prob_for_side: float,
+        decision: risk.ApexDecision,
     ) -> int:
         market_implied = cost_price_cents / 100.0
 
         before = self._net_position(slug)
         try:
             self.client.place_order(
-                market_slug=slug, side=side,
-                count=decision.count, yes_price=order_yes_price, immediate_or_cancel=True,
+                market_slug=slug,
+                side=side,
+                count=decision.count,
+                yes_price=order_yes_price,
+                immediate_or_cancel=True,
             )
         except Exception as exc:
             logger.warning("[sports_props] %s order rejected on %s: %s", side.upper(), slug, exc)
@@ -324,7 +340,9 @@ class SportsPropsBot:
                 return 0
             logger.error(
                 "[sports_props] CRITICAL: %s order on %s reported an error but left %s contracts -- recording it",
-                side.upper(), slug, _fmt_qty(filled),
+                side.upper(),
+                slug,
+                _fmt_qty(filled),
             )
         else:
             raw = self._position_after_order(slug, before) - before
@@ -346,25 +364,46 @@ class SportsPropsBot:
             cost_cents = 1
 
         grounding = self.calibration.evaluate(meta["sport"], meta["stat"], side, cost_price_cents)
-        rationale = llm.generate_rationale({
-            "action": "buy", "market_slug": slug, "sport": meta["sport"], "stat": meta["stat"],
-            "player": meta["player"],
-            "model_prob": model_prob_for_side, "market_implied_prob": market_implied,
-            "edge_pct": decision.edge_fraction, "calibration_note": grounding.calibration_note,
-            "stake_cents": cost_cents, "count": filled, "reason": decision.reason,
-            "bankroll_cents": self.memory.bankroll_cents,
-            "recent_lessons": self.memory.recent_lessons(3),
-        })
+        rationale = llm.generate_rationale(
+            {
+                "action": "buy",
+                "market_slug": slug,
+                "sport": meta["sport"],
+                "stat": meta["stat"],
+                "player": meta["player"],
+                "model_prob": model_prob_for_side,
+                "market_implied_prob": market_implied,
+                "edge_pct": decision.edge_fraction,
+                "calibration_note": grounding.calibration_note,
+                "stake_cents": cost_cents,
+                "count": filled,
+                "reason": decision.reason,
+                "bankroll_cents": self.memory.bankroll_cents,
+                "recent_lessons": self.memory.recent_lessons(3),
+            }
+        )
         self.memory.record_open(
-            market_slug=slug, side=side, count=filled, price_cents=cost_price_cents,
-            cost_cents=cost_cents, model_prob=model_prob_for_side,
-            market_implied_prob=market_implied, edge_pct=decision.edge_fraction,
-            kelly_fraction_used=decision.kelly_fraction_used, rationale=rationale["rationale"],
+            market_slug=slug,
+            side=side,
+            count=filled,
+            price_cents=cost_price_cents,
+            cost_cents=cost_cents,
+            model_prob=model_prob_for_side,
+            market_implied_prob=market_implied,
+            edge_pct=decision.edge_fraction,
+            kelly_fraction_used=decision.kelly_fraction_used,
+            rationale=rationale["rationale"],
         )
         logger.info(
             "[sports_props] %s %sx %s @ %d¢ (+%d¢ fee)  edge=%+.1f%%  cost=$%.2f  %s",
-            side.upper(), _fmt_qty(filled), slug, cost_price_cents, fee_cents,
-            decision.edge_fraction * 100, cost_cents / 100, rationale["rationale"],
+            side.upper(),
+            _fmt_qty(filled),
+            slug,
+            cost_price_cents,
+            fee_cents,
+            decision.edge_fraction * 100,
+            cost_cents / 100,
+            rationale["rationale"],
         )
         return cost_cents
 
@@ -385,7 +424,8 @@ class SportsPropsBot:
         if self.memory.is_halted():
             logger.error(
                 "[sports_props] HALTED -- %s. Resolve by hand and clear anomaly_halted_reason "
-                "in the ledger file to resume.", self.memory.anomaly_halted_reason,
+                "in the ledger file to resume.",
+                self.memory.anomaly_halted_reason,
             )
             return
         if self.memory.is_halted_today():
@@ -423,10 +463,7 @@ class SportsPropsBot:
             return
 
         held_games = {_game_key(t["market_slug"]) for t in self.memory.open_trades()}
-        held_buckets = {
-            k for k in (_trade_bucket_key(t) for t in self.memory.open_trades())
-            if k is not None
-        }
+        held_buckets = {k for k in (_trade_bucket_key(t) for t in self.memory.open_trades()) if k is not None}
 
         try:
             balance_cents = self.client.get_balance()
@@ -465,7 +502,9 @@ class SportsPropsBot:
             if not grounding.calibration_trustworthy:
                 logger.debug(
                     "[sports_props] PASS %s (%s side): no longer trustworthy at the requoted price (%s)",
-                    slug, side, grounding.calibration_note,
+                    slug,
+                    side,
+                    grounding.calibration_note,
                 )
                 continue
 
@@ -473,21 +512,28 @@ class SportsPropsBot:
             if bucket_key in held_buckets:
                 logger.info(
                     "[sports_props] PASS %s (%s side): already holding a position drawing on the same "
-                    "(sport, stat, side, decile) signal %s -- not an independent bet", slug, side, bucket_key,
+                    "(sport, stat, side, decile) signal %s -- not an independent bet",
+                    slug,
+                    side,
+                    bucket_key,
                 )
                 continue
 
             model_prob_for_side = _model_prob(grounding)
             decision = risk.evaluate(
-                model_prob=model_prob_for_side, price_cents=cost_price_cents,
-                bankroll_cents=self.memory.bankroll_cents, cash_cents=cash_cents,
+                model_prob=model_prob_for_side,
+                price_cents=cost_price_cents,
+                bankroll_cents=self.memory.bankroll_cents,
+                cash_cents=cash_cents,
                 max_contracts=depth,
             )
             if decision.action == "pass":
                 logger.debug("[sports_props] PASS %s (%s side): %s", slug, side, decision.reason)
                 continue
 
-            spent = self._place_decision(side, slug, meta, order_yes_price, cost_price_cents, model_prob_for_side, decision)
+            spent = self._place_decision(
+                side, slug, meta, order_yes_price, cost_price_cents, model_prob_for_side, decision
+            )
             cash_cents -= spent
             if spent > 0:
                 # Same-cycle guard: a second, different game landing in this
