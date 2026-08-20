@@ -103,15 +103,37 @@ def test_reserve_squeeze_below_the_minimum_stake_is_a_pass():
 
 
 def test_min_stake_floor_rejects_a_negligible_liquidity_capped_stake():
-    # A cheap longshot price plus thin book depth can pass every other gate
+    # A moderate price with thin book depth can pass every other gate
     # (edge, Kelly, cash reserve) and still size down to a couple of cents
     # once the liquidity cap bites.
     decision = risk.evaluate(
-        model_prob=0.9, price_cents=2, bankroll_cents=100_000, cash_cents=100_000, max_contracts=1,
+        model_prob=0.9, price_cents=50, bankroll_cents=100_000, cash_cents=100_000, max_contracts=0.02,
     )
     assert decision.action == "pass"
     assert decision.stake_cents == 0
     assert "minimum viable size" in decision.reason
+
+
+def test_cheap_longshot_price_is_rejected_even_with_a_huge_edge():
+    # 5c is well outside the 30-70c moderate-probability range -- rejected
+    # before edge/Kelly sizing even runs, regardless of how large the
+    # apparent edge is.
+    decision = risk.evaluate(model_prob=0.9, price_cents=5, bankroll_cents=100_000, cash_cents=100_000)
+    assert decision.action == "pass"
+    assert "moderate-probability range" in decision.reason
+
+
+def test_expensive_longshot_price_is_rejected_even_with_a_huge_edge():
+    # 95c (betting NO-side-equivalent certainty) is symmetric to the cheap
+    # case -- same gate, same reason.
+    decision = risk.evaluate(model_prob=0.02, price_cents=95, bankroll_cents=100_000, cash_cents=100_000)
+    assert decision.action == "pass"
+    assert "moderate-probability range" in decision.reason
+
+
+def test_moderate_price_at_the_range_boundary_is_still_tradeable():
+    decision = risk.evaluate(model_prob=0.5, price_cents=risk.MIN_TRADEABLE_PRICE_CENTS, bankroll_cents=100_000, cash_cents=100_000)
+    assert decision.action == "buy"
 
 
 def test_high_edge_overrides_the_cash_reserve_floor():
@@ -551,7 +573,7 @@ def test_scan_trades_the_no_side_when_only_its_decile_is_calibrated(tmp_path, mo
     model_prob) is independently trustworthy, and vice versa -- the two
     sides bet on different probabilities and must be gated separately."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    market = make_market(SLUG, yes_bid=95, yes_ask=97)  # NO costs 100-95=5c
+    market = make_market(SLUG, yes_bid=40, yes_ask=42)  # NO costs 100-40=60c
     grounding = BucketGrounding(
         city="nychigh", date="2026-08-10", low=80, high=81, model_prob=0.05,
         forecast_mu=60.0, forecast_sigma=1.0, forecast_cycle="c",

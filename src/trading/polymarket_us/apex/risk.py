@@ -36,6 +36,21 @@ MIN_CASH_RESERVE_FRACTION = 0.40
 HIGH_EDGE_OVERRIDE_FRACTION = 0.15
 MIN_STAKE_CENTS = 25
 
+# Added 2026-08-19 after real evidence that every longshot bucket Apex and
+# sports-props had actually traded on (price under ~20c) was also among the
+# thinnest-sampled: laxhigh 30-40% had only 8 historical rows, nychigh
+# 20-30% had 19, miahigh 30-40% had 29 -- right at or below the sample
+# floor. A probability near the edges of [0,1] has little room before a
+# couple of extra observed outcomes swing the measured rate by double
+# digits in relative terms, so "edge" on a cheap longshot is the easiest
+# kind of edge to manufacture from noise. Restricting to prices where the
+# market itself is genuinely uncertain (30-70c) trades on the calibration's
+# most stable ground and gives up the asymmetric "rare big win" payoff
+# shape entirely, by design -- explicit user preference 2026-08-19: "i
+# dont want long shot strat, thats just setting myself up to fail."
+MIN_TRADEABLE_PRICE_CENTS = 30
+MAX_TRADEABLE_PRICE_CENTS = 70
+
 
 @dataclass(frozen=True)
 class ApexDecision:
@@ -89,6 +104,13 @@ def evaluate(
     gate that fails; a BUY decision only survives every gate."""
     if not (1 <= price_cents <= 99):
         return ApexDecision("pass", 0.0, 0.0, 0.0, 0, 0.0, f"price {price_cents}c out of tradeable range")
+
+    if not (MIN_TRADEABLE_PRICE_CENTS <= price_cents <= MAX_TRADEABLE_PRICE_CENTS):
+        return ApexDecision(
+            "pass", 0.0, 0.0, 0.0, 0, 0.0,
+            f"price {price_cents}c outside the {MIN_TRADEABLE_PRICE_CENTS}-{MAX_TRADEABLE_PRICE_CENTS}c "
+            "moderate-probability range -- no longshot bets",
+        )
 
     edge = edge_fraction(model_prob, price_cents)
     if edge < MIN_EDGE_FRACTION:
