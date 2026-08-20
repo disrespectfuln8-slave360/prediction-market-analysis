@@ -140,11 +140,13 @@ class SportsPropsBot:
         memory: Optional[ApexMemory] = None,
         calibration: Optional[SportsPropCalibrationEngine] = None,
         poll_interval: int = 300,
+        allowed_sports: tuple[str, ...] = ("mlb", "nfl"),
     ):
         self.client = client
         self.memory = memory or ApexMemory()
         self.calibration = calibration or SportsPropCalibrationEngine()
         self.poll_interval = poll_interval
+        self.allowed_sports = allowed_sports
         self._session_started = False
 
     # ── Position readback (same paranoia as apex/bot.py) ─────────────────────
@@ -218,16 +220,26 @@ class SportsPropsBot:
         subtracted before anything is treated as stray. Real incident
         2026-08-17: this exact gap halted the bot on 6 of the ladder bot's
         own lock legs, confirmed after the fact via the exchange's own
-        manualOrderIndicator=AUTOMATIC on those fills."""
+        manualOrderIndicator=AUTOMATIC on those fills.
+
+        Also scoped to allowed_sports: since 2026-08-19 MLB and NFL each run
+        as their own SportsPropsBot instance with their own ledger, sharing
+        this same account. A position in the OTHER instance's sport is real
+        and tracked -- just not by this one -- so it must never register as
+        stray here either, the same way the ladder bot's own holdings don't."""
         try:
             live_positions = self.client.get_positions()
         except Exception as exc:
             logger.warning("[sports_props] position reconciliation check failed: %s", exc)
             return
-        live_slugs = {
-            p.market_slug for p in live_positions
-            if abs(p.position) > FILL_EPSILON and _game_key(p.market_slug) is not None
-        }
+        live_slugs = set()
+        for p in live_positions:
+            if abs(p.position) <= FILL_EPSILON:
+                continue
+            meta = _parse_any_prop_slug(p.market_slug)
+            if meta is None or meta["sport"] not in self.allowed_sports:
+                continue
+            live_slugs.add(p.market_slug)
         tracked_slugs = {t["market_slug"] for t in self.memory.open_trades()}
         ladder_slugs = _ladder_bot_held_slugs()
 
@@ -402,7 +414,7 @@ class SportsPropsBot:
             if not m.slug.startswith("astatc-"):
                 continue
             meta = _parse_any_prop_slug(m.slug)
-            if meta is None:
+            if meta is None or meta["sport"] not in self.allowed_sports:
                 continue
             key = (meta["sport"], meta["matchup"], meta["date"])
             buckets_by_game.setdefault(key, []).append((m.slug, meta, m))

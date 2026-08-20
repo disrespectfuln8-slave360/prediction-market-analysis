@@ -1,11 +1,19 @@
-"""Launch the sports-props trading bot for polymarket.us.
+"""Launch the sports-props trading bot for polymarket.us -- MLB only.
 
 See src/trading/polymarket_us/sports_props_bot.py for the full design
-rationale -- why this only trades astatc-* MLB/NFL player-prop markets,
+rationale -- why this only trades astatc-mlb-* player-prop markets,
 why it's grounded in the market's own historical price-level accuracy
 rather than an independent forecast (there isn't one), and why real
 trades stay gated by SportsPropCalibrationEngine's own trustworthiness
 check until the underlying data matures.
+
+NFL runs as its own separate bot (run_polyus_nfl_props.py) as of
+2026-08-19 -- own bankroll, own ledger, own scheduled task -- rather than
+sharing this one's bankroll the way it briefly did. The two share this
+same live account (like the ladder bot and Apex also do), which is why
+SportsPropsBot's own live-position reconciliation is scoped to
+allowed_sports: a real NFL position on the account is real and tracked,
+just by the other process, not this one.
 
 Paper mode by default, like every other bot launcher in this repo. Set
 POLYMARKET_US_SPORTS_PROPS_PAPER_TRADING=false to go live -- deliberately
@@ -59,8 +67,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from src.common.single_instance import acquire_single_instance_lock
 from src.trading.mode import is_paper_mode, log_mode_banner
 from src.trading.polymarket_us.apex.memory import ApexMemory
-from src.trading.polymarket_us.nfl_prop_quote_logger import QUOTES_PATH as NFL_QUOTES_PATH
-from src.trading.polymarket_us.nfl_prop_quote_logger import SETTLEMENTS_PATH as NFL_SETTLEMENTS_PATH
 from src.trading.polymarket_us.sports_prop_calibration import SportsPropCalibrationEngine
 from src.trading.polymarket_us.sports_props_bot import SportsPropsBot
 from src.trading.polymarket_us.trading_client import PolymarketUSTradingClient
@@ -109,12 +115,8 @@ def main():
 
     client = make_polymarket_us_client()
     memory = make_sports_props_memory()
-    # NFL's own data files (nfl_prop_quote_logger.py) merge in alongside the
-    # primary MLB pair -- calibration is already scoped per (sport, stat)
-    # regardless of source file, see SportsPropCalibrationEngine's own
-    # extra_sources docstring.
-    calibration = SportsPropCalibrationEngine(extra_sources=((NFL_QUOTES_PATH, NFL_SETTLEMENTS_PATH),))
-    bot = SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=300)
+    calibration = SportsPropCalibrationEngine()
+    bot = SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=300, allowed_sports=("mlb",))
 
     logging.getLogger("launcher").info("Sports-props trading bot running. Ctrl+C to stop.")
     bot.run_forever(stop_event)

@@ -105,9 +105,10 @@ class FakeClient:
                      count=count, price_cents=yes_price, status="unknown")
 
 
-def make_bot(client, calibration, memory):
+def make_bot(client, calibration, memory, allowed_sports=("mlb", "nfl")):
     bot_module.FILL_POLL_DELAY = 0
-    return SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=1)
+    return SportsPropsBot(client=client, memory=memory, calibration=calibration, poll_interval=1,
+                           allowed_sports=allowed_sports)
 
 
 def _publish_ladder_holdings(slugs) -> None:
@@ -436,6 +437,46 @@ def test_mlb_and_nfl_games_on_the_same_day_are_independent_slots(tmp_path, monke
     bot._scan_once()
 
     assert len(client.orders) == 2
+
+
+def test_allowed_sports_filters_other_sports_out_of_trading(tmp_path, monkeypatch):
+    """As of 2026-08-19, MLB and NFL each run as their own SportsPropsBot
+    instance via allowed_sports. An MLB-only instance must never trade an
+    NFL candidate even if it's the only market it sees, and vice versa."""
+    monkeypatch.chdir(tmp_path)
+    nfl_slug = "astatc-nfl-den-atl-2026-08-14-ptd-jarsti-gte1"
+    market = make_market(nfl_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("nfl", "ptd", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("nfl", "ptd", "yes", 40): grounding})
+    client = FakeClient([market], fills={nfl_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory, allowed_sports=("mlb",))
+    bot._scan_once()
+
+    assert len(client.orders) == 0
+    assert memory.open_trades() == []
+
+
+def test_allowed_sports_scopes_the_stray_position_check(tmp_path, monkeypatch):
+    """A real MLB position on the shared account belongs to the sibling
+    MLB-only SportsPropsBot instance, not this NFL-only one -- it must
+    never register as stray/untracked here, the same way the ladder bot's
+    and Apex's positions already don't."""
+    monkeypatch.chdir(tmp_path)
+    nfl_slug = "astatc-nfl-den-atl-2026-08-14-ptd-jarsti-gte1"
+    market = make_market(nfl_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("nfl", "ptd", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("nfl", "ptd", "yes", 40): grounding})
+    client = FakeClient([market], fills={nfl_slug: 99})
+    client.positions[SLUG] = 5.0  # a real MLB position, owned by the sibling bot
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory, allowed_sports=("nfl",))
+    bot._scan_once()
+
+    assert not memory.is_halted()
+    assert len(client.orders) == 1
 
 
 def test_reconciliation_ignores_other_bots_live_positions(tmp_path, monkeypatch):
