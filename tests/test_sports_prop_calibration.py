@@ -24,7 +24,7 @@ def _write_jsonl(path, rows):
             fh.write(json.dumps(row) + "\n")
 
 
-def _quote(slug, sport="mlb", stat="hits", bid=None, ask=None):
+def _quote(slug, sport="mlb", stat="hits", bid=None, ask=None, player=None):
     return {
         "ts": "2026-08-15T00:00:00Z",
         "slug": slug,
@@ -32,7 +32,12 @@ def _quote(slug, sport="mlb", stat="hits", bid=None, ask=None):
         "stat": stat,
         "matchup": "aaa-bbb",
         "date": "2026-08-15",
-        "player": "player1",
+        # Defaults to the slug itself, not a fixed "player1" -- distinct_games
+        # is keyed on (matchup, date, player), so every fixture row sharing
+        # one hardcoded player would collapse into a single "game" no matter
+        # how many rows a test generates, undercounting real evidence the
+        # same way the correlated-threshold-slugs bug did in production.
+        "player": player if player is not None else slug,
         "threshold": 1,
         "bid": bid,
         "ask": ask,
@@ -41,7 +46,7 @@ def _quote(slug, sport="mlb", stat="hits", bid=None, ask=None):
     }
 
 
-def _settlement(slug, sport="mlb", stat="hits", outcome_yes=True, resolved_ts="2026-08-15T00:00:00+00:00"):
+def _settlement(slug, sport="mlb", stat="hits", outcome_yes=True, resolved_ts="2026-08-15T00:00:00+00:00", player=None):
     return {
         "resolved_ts": resolved_ts,
         "slug": slug,
@@ -49,7 +54,7 @@ def _settlement(slug, sport="mlb", stat="hits", outcome_yes=True, resolved_ts="2
         "stat": stat,
         "matchup": "aaa-bbb",
         "date": "2026-08-15",
-        "player": "player1",
+        "player": player if player is not None else slug,
         "threshold": 1,
         "outcome_yes": outcome_yes,
     }

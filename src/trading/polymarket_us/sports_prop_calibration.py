@@ -107,7 +107,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 def _build_calibration_table(
     quotes: list[dict], settlements: list[dict]
 ) -> dict[tuple[str, str], dict[str, dict[int, dict]]]:
-    """(sport, stat) -> {"yes": {decile: {count, actual_rate}}, "no": {...}}
+    """(sport, stat) -> {"yes": {decile: {count, wins, actual_rate, distinct_games}}, "no": {...}}
 
     Priced off each slug's FIRST recorded ask (yes cost) / first recorded
     bid (used to derive no cost = 100 - bid) -- a simple proxy for entry
@@ -115,6 +115,17 @@ def _build_calibration_table(
     enough to validate the bucketing approach; worth refining once there's
     a reason to believe entry-price choice is the binding constraint rather
     than sample count.
+
+    distinct_games counts unique (matchup, date, player) combinations, not
+    raw slugs. Real bug found 2026-08-20: a single player-game commonly
+    spawns multiple threshold slugs in the SAME decile (e.g. "2+ total
+    bases" and "3+ total bases" both landing at 15c) whose outcomes are
+    correlated -- they share the same at-bat results, so they are not
+    independent evidence the way `count` alone implies. A bucket with 965
+    raw samples from only 722 distinct player-games was overstating its
+    real evidence by ~1.3x. actual_rate still uses every real observation
+    (no data thrown away); distinct_games is what the trustworthiness gate
+    checks against, so the sample floor reflects real independent evidence.
     """
     first_ask: dict[str, int] = {}
     first_bid: dict[str, int] = {}
@@ -131,33 +142,37 @@ def _build_calibration_table(
 
     table: dict[tuple[str, str], dict[str, dict[int, dict]]] = {}
 
-    def _bucket(key: tuple[str, str], side: str, price: int, won: bool) -> None:
+    def _bucket(key: tuple[str, str], side: str, price: int, won: bool, game_key: tuple) -> None:
         cat = table.setdefault(key, {"yes": {}, "no": {}})
         decile = _decile_low(price)
-        d = cat[side].setdefault(decile, {"count": 0, "wins": 0})
+        d = cat[side].setdefault(decile, {"count": 0, "wins": 0, "games": set()})
         d["count"] += 1
         d["wins"] += 1 if won else 0
+        d["games"].add(game_key)
 
     for slug, s in settle_by_slug.items():
         key = (s.get("sport", ""), s.get("stat", ""))
         outcome_yes = s.get("outcome_yes")
         if outcome_yes is None:
             continue
+        game_key = (s.get("matchup"), s.get("date"), s.get("player"))
 
         ask = first_ask.get(slug)
         if ask is not None:
-            _bucket(key, "yes", ask, won=outcome_yes)
+            _bucket(key, "yes", ask, won=outcome_yes, game_key=game_key)
 
         bid = first_bid.get(slug)
         if bid is not None:
             no_price = 100 - bid
-            _bucket(key, "no", no_price, won=not outcome_yes)
+            _bucket(key, "no", no_price, won=not outcome_yes, game_key=game_key)
 
-    # Derive actual_rate from count/wins.
+    # Derive actual_rate from count/wins; collapse the games set to a count.
     for cat in table.values():
         for side_table in (cat["yes"], cat["no"]):
             for _decile, d in side_table.items():
                 d["actual_rate"] = 100.0 * d["wins"] / d["count"] if d["count"] else 0.0
+                d["distinct_games"] = len(d["games"])
+                del d["games"]
 
     return table
 
@@ -228,15 +243,16 @@ class SportsPropCalibrationEngine:
         if cat is None:
             return False, f"no calibration data at all for {sport}/{stat}", 0, None
         info = cat[side].get(decile)
-        if info is None or info["count"] < MIN_SAMPLE_FLOOR:
-            count = info["count"] if info else 0
+        if info is None or info["distinct_games"] < MIN_SAMPLE_FLOOR:
+            games = info["distinct_games"] if info else 0
+            raw = info["count"] if info else 0
             return (
                 False,
                 (
-                    f"only {count} historical {side} sample(s) in the {decile}-{decile + 10}% "
-                    f"range for {sport}/{stat} (need {MIN_SAMPLE_FLOOR})"
+                    f"only {games} distinct historical {side} player-game(s) ({raw} raw samples) "
+                    f"in the {decile}-{decile + 10}% range for {sport}/{stat} (need {MIN_SAMPLE_FLOOR})"
                 ),
-                count,
+                games,
                 (info["actual_rate"] if info else None),
             )
         # Bucket midpoint is the best single number to compare the measured
@@ -248,19 +264,19 @@ class SportsPropCalibrationEngine:
                 False,
                 (
                     f"{sport}/{stat} {side} measured {error:.1f}pp off the {decile}-{decile + 10}% "
-                    f"range's midpoint ({info['count']} samples) — exceeds the "
+                    f"range's midpoint ({info['distinct_games']} distinct player-games) — exceeds the "
                     f"{MAX_CALIBRATION_ERROR_PCT:.0f}pp tolerance"
                 ),
-                info["count"],
+                info["distinct_games"],
                 info["actual_rate"],
             )
         return (
             True,
             (
-                f"calibration OK: {info['count']} samples, actual rate {info['actual_rate']:.1f}% "
-                f"in the {decile}-{decile + 10}% range"
+                f"calibration OK: {info['distinct_games']} distinct player-games ({info['count']} raw "
+                f"samples), actual rate {info['actual_rate']:.1f}% in the {decile}-{decile + 10}% range"
             ),
-            info["count"],
+            info["distinct_games"],
             info["actual_rate"],
         )
 
