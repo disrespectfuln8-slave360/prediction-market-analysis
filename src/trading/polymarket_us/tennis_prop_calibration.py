@@ -33,10 +33,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_QUOTES_PATH = Path("data/polymarket_us/tennis_prop_quotes.jsonl")
 DEFAULT_SETTLEMENTS_PATH = Path("data/polymarket_us/tennis_prop_settlements.jsonl")
 
-# Inherited from sports_prop_calibration.py's own validated figures --
-# tennis is a new, smaller dataset with no independent validation of its
-# own yet, so start from the same conservative defaults rather than guess.
-MIN_SAMPLE_FLOOR = 30
+# Lowered from 30 to 15 on 2026-08-20, now that this floor is checked
+# against distinct_matches (real independent evidence) instead of raw
+# slug count -- see _build_calibration_table's docstring for the
+# correlated-threshold-slugs bug that made the old raw count overstate
+# real evidence by up to ~7x here. 30 real distinct matches is currently
+# unreachable for ANY bucket (the best has 23, out of only 45 collected
+# total), which would pause tennis trading entirely; 15 is real evidence,
+# just a smaller pile of it than MLB/Apex require -- explicit user choice
+# 2026-08-20, trading off some real precision to let tennis trade sooner.
+MIN_SAMPLE_FLOOR = 15
 MAX_CALIBRATION_ERROR_PCT = 10.0
 STALE_DATA_DAYS = 3
 
