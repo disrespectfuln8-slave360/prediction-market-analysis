@@ -45,11 +45,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_QUOTES_PATH = Path("data/polymarket_us/sports_prop_quotes.jsonl")
 DEFAULT_SETTLEMENTS_PATH = Path("data/polymarket_us/sports_prop_settlements.jsonl")
 
-# Matches the floor already checked live against this dataset (see module
-# docstring) -- not Apex's MIN_SAMPLE_FLOOR=25, this is a different data
-# source with different density, and 30 is what the real numbers above were
-# validated against.
-MIN_SAMPLE_FLOOR = 30
+# Raised from 30 to 500 on 2026-08-19 after real losses traced to buckets
+# that had cleared 30 samples but hadn't actually stabilized. Direct
+# evidence: (mlb, tb, yes, 10c)'s measured win rate ran 22.0% at n=50, was
+# still 21.5% at n=418 (the exact sample count 4 real trades relied on, all
+# 4 of which lost), and kept falling to 12.8% by n=799 -- it didn't stop
+# moving until roughly n=600. (mlb, k, 40-50%) and (mlb, outs, 50-60%)
+# showed the same early-samples-run-hot shape on smaller n. 30 was a floor
+# checked only for "does data exist at all," never validated against
+# whether the measured rate had actually converged -- it hadn't, for any
+# bucket checked. 500 matches where the one bucket with enough history to
+# test actually leveled off; see the calibration_note this produces for the
+# real sample count and rate a live decision is based on.
+MIN_SAMPLE_FLOOR = 500
 
 # Same tolerance Apex uses for weather -- not re-derived for this dataset
 # yet, just inherited as the same conservative default until there's reason
