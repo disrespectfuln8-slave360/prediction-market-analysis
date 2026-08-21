@@ -51,6 +51,7 @@ from src.trading.polymarket_us import sports_props_llm as llm
 from src.trading.polymarket_us.apex import risk
 from src.trading.polymarket_us.apex.memory import ApexMemory
 from src.trading.polymarket_us.bot import HELD_SLUGS_PATH as LADDER_HELD_SLUGS_PATH
+from src.trading.polymarket_us.golf_prop_quote_logger import parse_golf_slug
 from src.trading.polymarket_us.nfl_prop_quote_logger import parse_nfl_prop_slug
 from src.trading.polymarket_us.paper_client import _settlement_to_cents
 from src.trading.polymarket_us.sports_prop_calibration import SportsPropCalibrationEngine, _decile_low
@@ -99,17 +100,22 @@ def _model_prob(grounding) -> float:
 
 
 def _parse_any_prop_slug(slug: str) -> dict | None:
-    """Tries every per-game-matchup sport family this bot trades: MLB (the
-    shared sports_prop_quote_logger.py) and NFL (its own dedicated module,
-    split out 2026-08-17 so NFL's per-game matchup props get their own data
-    file -- see nfl_prop_quote_logger.py's docstring for why only that one
-    NFL shape, out of three real ones, is tracked at all). Each parser
-    already rejects slugs outside its own sport, so trying both in sequence
-    is safe -- a slug can only ever match one."""
+    """Tries every sport family this bot trades: MLB (the shared
+    sports_prop_quote_logger.py), NFL (its own dedicated module, split out
+    2026-08-17 so NFL's per-game matchup props get their own data file --
+    see nfl_prop_quote_logger.py's docstring for why only that one NFL
+    shape, out of three real ones, is tracked at all), and golf (PGA Tour
+    round-leader markets only -- see golf_prop_quote_logger.py's docstring
+    for why outright-winner and LPGA/LIV markets are excluded). Each parser
+    already rejects slugs outside its own shape, so trying all three in
+    sequence is safe -- a slug can only ever match one."""
     meta = parse_prop_slug(slug)
     if meta is not None:
         return meta
-    return parse_nfl_prop_slug(slug)
+    meta = parse_nfl_prop_slug(slug)
+    if meta is not None:
+        return meta
+    return parse_golf_slug(slug)
 
 
 def _game_key(slug: str) -> tuple | None:
@@ -451,7 +457,7 @@ class SportsPropsBot:
 
         buckets_by_game: dict[tuple, list] = {}
         for m in markets:
-            if not m.slug.startswith("astatc-"):
+            if not m.slug.startswith(("astatc-", "tec-pga-")):
                 continue
             meta = _parse_any_prop_slug(m.slug)
             if meta is None or meta["sport"] not in self.allowed_sports:

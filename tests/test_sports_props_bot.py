@@ -497,6 +497,28 @@ def test_mlb_and_nfl_games_on_the_same_day_are_independent_slots(tmp_path, monke
     assert len(client.orders) == 2
 
 
+def test_scan_recognizes_golf_slugs_via_the_dedicated_golf_parser(tmp_path, monkeypatch):
+    """Golf split out 2026-08-20, scoped to PGA round-leader only (see
+    golf_prop_quote_logger.py's docstring for the real market survey) --
+    this bot's own market-scanning must recognize the tec-pga- prefix and
+    round-leader shape via _parse_any_prop_slug."""
+    monkeypatch.chdir(tmp_path)
+    golf_slug = "tec-pga-bmwcham-2026-08-20-r1l-jspa"
+    market = make_market(golf_slug, yes_bid=38, yes_ask=40)
+    grounding = make_grounding("golf", "r1l", "yes", 40, actual_rate=70.0)
+    calibration = FakeCalibration({("golf", "r1l", "yes", 40): grounding})
+    client = FakeClient([market], fills={golf_slug: 99})
+    memory = ApexMemory(path=tmp_path / "m.json", starting_bankroll_cents=1000)
+
+    bot = make_bot(client, calibration, memory, allowed_sports=("golf",))
+    bot._scan_once()
+
+    assert len(client.orders) == 1
+    slug, side, count, yes_price, ioc = client.orders[0]
+    assert (slug, side, yes_price) == (golf_slug, "yes", 40)
+    assert memory.open_trades()[0]["side"] == "yes"
+
+
 def test_allowed_sports_filters_other_sports_out_of_trading(tmp_path, monkeypatch):
     """As of 2026-08-19, MLB and NFL each run as their own SportsPropsBot
     instance via allowed_sports. An MLB-only instance must never trade an

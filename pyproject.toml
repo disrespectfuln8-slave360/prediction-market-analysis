@@ -64,6 +64,7 @@ ignore = [
 # so the ordering is load-order-dependent, not an oversight.
 "run_polyus.py" = ["E402"]
 "run_polyus_apex.py" = ["E402"]
+"run_polyus_golf_props.py" = ["E402"]
 "run_polyus_nfl_props.py" = ["E402"]
 "run_polyus_sports_props.py" = ["E402"]
 "run_polyus_tennis_props.py" = ["E402"]
