@@ -94,7 +94,13 @@ def main() -> int:
     paper = is_paper_mode(PLATFORM)
     log_mode_banner("kalshi-mispricing", PLATFORM)
 
-    real_client = KalshiTradingClient()
+    try:
+        real_client = KalshiTradingClient()
+    except RuntimeError as exc:
+        # A missing local credential is a setup problem, not a crash — say so
+        # plainly and exit non-zero instead of dumping a traceback.
+        logger.error("%s", exc)
+        return 1
     client = PaperKalshiTradingClient(real_client=real_client) if paper else real_client
 
     tracker = PerformanceTracker()

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from src.common.event_exposure import EventExposureTracker
 from src.common.reservation import TickerReservation
+from src.indexers.kalshi.models import Market
+from src.trading.kalshi import risk
 from src.trading.kalshi.learning import PerformanceTracker
 from src.trading.kalshi.risk import RiskLedger
 from src.trading.kalshi.strategy import Lock, MispricingStrategy, Opportunity, event_key
@@ -237,12 +239,49 @@ class TradingBot:
         held_contracts = sum(abs(p.position) for p in positions)
         return balance_cents + held_contracts
 
-    def _cancel_stale(self, open_orders: list[Order], opps: list[Opportunity]):
-        live = {(o.market.ticker, o.side) for o in opps}
+    def _cancel_all(self, open_orders: list[Order], reason: str) -> None:
+        """Pull every resting order. Used when halted — a resting order is
+        still live exposure, so a halt that left orders on the book would not
+        actually be a halt."""
         for order in open_orders:
-            if (order.ticker, order.side) not in live:
-                logger.info("Cancelling stale order %s on %s", order.order_id, order.ticker)
-                self.client.cancel_order(order.order_id)
+            logger.info("Cancelling order %s on %s — %s", order.order_id, order.ticker, reason)
+            self.client.cancel_order(order.order_id)
+
+    def _cancel_stale(self, open_orders: list[Order], markets: list[Market]) -> None:
+        """Cancel resting orders that no longer have edge, keeping those that do.
+
+        The edge is recomputed directly from the current book rather than
+        inferred from this scan's opportunity list. That list cannot answer
+        the question: `find_opportunities` skips every held ticker, and a
+        ticker with a resting order is held by definition, so an order's own
+        ticker is structurally guaranteed to be absent from it. Matching
+        against it therefore cancelled EVERY resting order on the very next
+        scan, whatever the price had done -- which quietly defeated the whole
+        point of posting at the mid (see _limit_price: maker orders exist to
+        capture half the spread instead of paying it, and an order that is
+        pulled one poll interval later rarely gets filled at all).
+
+        An order whose market has left the book is cancelled too: it can no
+        longer be evaluated, and the exchange would cancel it on close anyway.
+        """
+        by_ticker = {m.ticker: m for m in markets}
+        for order in open_orders:
+            market = by_ticker.get(order.ticker)
+            if market is None:
+                self._cancel_all([order], "market no longer in the live book")
+                continue
+
+            # The order rests at its own limit price, not the current touch,
+            # so that is the price whose edge decides whether to keep it.
+            side_price = order.yes_price if order.side == "yes" else 100 - order.yes_price
+            win_rate = self.strategy._interpolate_win_rate(side_price, order.side)
+            if win_rate is None:
+                self._cancel_all([order], "no calibration data at this price any more")
+                continue
+
+            edge = risk.after_fee_edge_pp(win_rate, side_price)
+            if edge < risk.MIN_EDGE_PP:
+                self._cancel_all([order], f"after-fee edge {edge:+.1f}pp now below the {risk.MIN_EDGE_PP:.0f}pp floor")
 
     def _reconcile_pending_fills(self, positions: list[Position], open_orders: list[Order]) -> None:
         """Resolve orders placed on a prior cycle that were resting (not yet
@@ -539,7 +578,7 @@ class TradingBot:
                 # Resting orders are still exposure, so pull them rather than
                 # leaving them to fill into a halted account.
                 if open_orders:
-                    self._cancel_stale(open_orders, [])
+                    self._cancel_all(open_orders, "trading halted")
                 return
 
         # Resolve any orders from a prior cycle that were resting (not yet
@@ -592,7 +631,7 @@ class TradingBot:
         # Only cancel stale orders when we have real market data — a network blip
         # returning 0 markets would otherwise wipe out all open orders.
         if markets:
-            self._cancel_stale(open_orders, opps)
+            self._cancel_stale(open_orders, markets)
 
         remaining_budget = budget_cents
         if slots > 0 and opps and budget_cents > 0:

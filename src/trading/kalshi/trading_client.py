@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -96,8 +97,37 @@ class KalshiTradingClient:
         private_key_path: str | None = None,
         host: str = KALSHI_API_HOST,
     ):
-        key_id = key_id or os.environ["KALSHI_API_KEY"]
-        private_key_path = private_key_path or os.environ["KALSHI_PRIVATE_KEY_PATH"]
+        # Raise something actionable rather than a bare KeyError traceback.
+        # This is the first thing a new operator hits, and it fires even in
+        # paper mode (the paper client wraps a real one for read-only market
+        # data), so "KeyError: 'KALSHI_API_KEY'" reads like a bug in the bot
+        # rather than a missing local credential.
+        key_id = key_id or os.environ.get("KALSHI_API_KEY")
+        private_key_path = private_key_path or os.environ.get("KALSHI_PRIVATE_KEY_PATH")
+        missing = [
+            name
+            for name, value in (
+                ("KALSHI_API_KEY", key_id),
+                ("KALSHI_PRIVATE_KEY_PATH", private_key_path),
+            )
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Missing Kalshi credential(s): {', '.join(missing)}. "
+                "Copy .env.example to .env and fill them in (KALSHI_API_KEY is the "
+                "key ID from your Kalshi dashboard; KALSHI_PRIVATE_KEY_PATH points at "
+                "your RSA private key PEM). These are needed even in paper mode, "
+                "because paper trading still reads real market data — it just never "
+                "sends an order."
+            )
+
+        if not Path(private_key_path).exists():
+            raise RuntimeError(
+                f"KALSHI_PRIVATE_KEY_PATH points at '{private_key_path}', which does "
+                "not exist. It must be the path to your RSA private key PEM file."
+            )
+
         signer = _KalshiSigner(key_id, private_key_path)
         self.http = HttpClient(base_url=host, rate_limit=5, auth_hook=signer)
         # Order placement must never be silently retried by the shared retry
